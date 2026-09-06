@@ -1039,7 +1039,7 @@ export function buildFace(T = THREE_NS, C = DEFAULT_CONFIG) {
     // forward: at an offset of 0.16*R the pupil sat inside its own eyeball and
     // rendered as nothing at all, which is not a shading problem and cannot be
     // fixed by darkening it.
-    const eyeTip = new T.SphereGeometry(EYE_R * 0.50, 12, 9);
+    const eyeTip = new T.SphereGeometry(EYE_R * 0.37, 12, 9);
     eyeTip.scale(1, 1, 0.55);
     eyeTip.translate(0, 0, -EYE_R * 0.34);
 
