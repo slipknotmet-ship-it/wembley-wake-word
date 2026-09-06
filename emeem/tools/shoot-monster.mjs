@@ -24,7 +24,25 @@ page.on('console', m => { if (m.type() === 'error' && !/favicon/i.test(m.text())
 await page.goto(URL, { waitUntil: 'load', timeout: 45000 });
 await page.waitForFunction(() => window.__READY__ === true, null, { timeout: 30000 });
 
-const available = await page.evaluate(() => window.__MONSTER__.available);
+/**
+ * Vite's HMR full-reloads this page whenever a candidate file is written, which
+ * destroys the execution context mid-shoot while the candidates are still being
+ * authored. Retry once, after waiting for the page to come back up.
+ */
+async function evalSafe(fn, arg) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return arg === undefined ? await page.evaluate(fn) : await page.evaluate(fn, arg);
+    } catch (err) {
+      if (!/context was destroyed|Target closed|Execution context/i.test(String(err))) throw err;
+      await page.waitForFunction(() => window.__READY__ === true, null, { timeout: 30000 });
+      await page.waitForTimeout(250);
+    }
+  }
+  throw new Error('page kept reloading; re-run once the candidates have settled');
+}
+
+const available = await evalSafe(() => window.__MONSTER__.available);
 console.log('candidates built:', available.length ? available.join(', ') : '(none)');
 if (!available.length) { await browser.close(); process.exit(1); }
 
@@ -39,11 +57,11 @@ const STATES = [
 const rows = [];
 for (const key of available) {
   const shots = [];
-  await page.evaluate((k) => window.__MONSTER__.mount(k), key);
+  await evalSafe((k) => window.__MONSTER__.mount(k), key);
   for (const st of STATES) {
-    const img = await page.evaluate(({ anger, mouth }) => {
+    const img = await evalSafe(({ anger, mouth }) => {
       const M = window.__MONSTER__;
-      M.frameIt(0, 1.55);
+      M.frameIt(180, 1.55);  // the rigs face -Z, so the camera belongs in FRONT of them
       M.setAnger(anger); M.setMouth(mouth);
       M.step(45, 1 / 60, { anger, proximity: anger, speed: 4.6 + 4 * anger });
       M.render();
