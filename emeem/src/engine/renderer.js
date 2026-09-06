@@ -132,7 +132,16 @@ export function createRenderer(canvasEl) {
   sc.far = SUN_DISTANCE * 2.2;
   sc.updateProjectionMatrix();
 
-  sun.shadow.mapSize.set(CONFIG.render.shadowMapSize, CONFIG.render.shadowMapSize);
+  // Shadow map resolution, sanitised once. A zero/garbage value here would
+  // divide by zero in the anchor quantisation below and put NaN into the sun's
+  // position, which silently blacks out every shadow in the game.
+  const shadowMapSize = (Number.isFinite(CONFIG.render.shadowMapSize) && CONFIG.render.shadowMapSize > 0)
+    ? CONFIG.render.shadowMapSize
+    : 1024;
+  /** World-space grid the shadow anchor is snapped to (8 shadow texels). */
+  const SHADOW_GRID = ((SHADOW_EXTENT * 2) / shadowMapSize) * 8;
+
+  sun.shadow.mapSize.set(shadowMapSize, shadowMapSize);
   // Peter-panning vs acne: a small negative bias plus a normalBias handles the
   // steep sun angle on big obstacle boxes without detaching contact shadows.
   sun.shadow.bias = -0.0006;
@@ -237,15 +246,15 @@ export function createRenderer(canvasEl) {
   function followShadowCamera(playerPos) {
     if (!sun.castShadow) return;
 
-    // Quantise the anchor to a coarse world grid. The shadow texel footprint at
-    // this ortho size is ~40/mapSize metres; snapping the anchor stops the depth
-    // map sliding under static geometry, which otherwise crawls along every edge
-    // as the camera glides. The grid is world-aligned rather than light-aligned,
-    // so it is an approximation - but it removes most of the visible shimmer for
+    // Quantise the anchor to a coarse world grid (SHADOW_GRID, computed once
+    // from the sanitised map size). The shadow texel footprint at this ortho
+    // size is ~40/mapSize metres; snapping the anchor stops the depth map
+    // sliding under static geometry, which otherwise crawls along every edge as
+    // the camera glides. The grid is world-aligned rather than light-aligned, so
+    // it is an approximation - but it removes most of the visible shimmer for
     // one multiply per axis.
-    const step = (SHADOW_EXTENT * 2) / CONFIG.render.shadowMapSize * 8;
-    const ax = Math.round(playerPos.x / step) * step;
-    const az = Math.round(playerPos.z / step) * step;
+    const ax = Math.round(playerPos.x / SHADOW_GRID) * SHADOW_GRID;
+    const az = Math.round(playerPos.z / SHADOW_GRID) * SHADOW_GRID;
 
     // Bias the box a little ahead of the player (toward -Z, the running
     // direction) so obstacles you are about to reach are already shadowed.
@@ -258,6 +267,14 @@ export function createRenderer(canvasEl) {
   }
 
   // -------------------------------------------------------------- resize
+  // Last applied backbuffer geometry. Assigning canvas.width/height reallocates
+  // the drawing buffer even when the value is unchanged, and Android Chrome
+  // fires 'resize' repeatedly while the URL bar animates - so a resize that
+  // changes nothing has to be a genuine no-op, not a per-event realloc.
+  let lastW = -1;
+  let lastH = -1;
+  let lastDpr = -1;
+
   function resize() {
     if (typeof window === 'undefined') return;
     const w = Math.max(1, window.innerWidth | 0);
@@ -273,6 +290,12 @@ export function createRenderer(canvasEl) {
         : 1,
       CONFIG.render.maxPixelRatio,
     );
+
+    if (w === lastW && h === lastH && dpr === lastDpr) return;
+    lastW = w;
+    lastH = h;
+    lastDpr = dpr;
+
     renderer.setPixelRatio(dpr);
     // updateStyle = false: index.html already sizes the canvas with fixed inset
     // + 100%/100%, and letting three write inline px sizes fights the safe-area
@@ -281,6 +304,27 @@ export function createRenderer(canvasEl) {
 
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
+  }
+
+  /**
+   * main.js already wires window 'resize'. On Android Chrome and inside the
+   * Capacitor WebView the height change when the URL bar hides - and sometimes
+   * a rotation - only surfaces as an orientationchange or a visualViewport
+   * event, which would otherwise leave the backbuffer letterboxed until the
+   * next real window resize. Registered once per renderer (createRenderer is
+   * called exactly once per page), and resize() above is a no-op when nothing
+   * actually changed, so the extra sources cost nothing.
+   */
+  function watchViewport() {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
+    const onViewportChange = () => resize();
+    try {
+      window.addEventListener('orientationchange', onViewportChange);
+      const vv = window.visualViewport;
+      if (vv && typeof vv.addEventListener === 'function') {
+        vv.addEventListener('resize', onViewportChange);
+      }
+    } catch { /* non-DOM host: nothing to listen to */ }
   }
 
   // -------------------------------------------------------------- update
@@ -393,6 +437,7 @@ export function createRenderer(canvasEl) {
   snapTo(globalState.player.pos);
   followShadowCamera(globalState.player.pos);
   resize();
+  watchViewport();
 
   return { renderer, scene, camera, sun, hemi, resize, render, reset, update, setDread };
 }

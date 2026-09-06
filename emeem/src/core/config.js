@@ -74,7 +74,11 @@ export const CONFIG = {
     bobHeight: 0.28,
     bobSpeed: 2.1,
     spinSpeed: 1.4,
-    hoverY: 0.95,
+    // Low enough that the hand dips its pincer DOWN to take one, the way you
+    // would actually pick something up. At 0.95 they floated above the palm
+    // (which stands at 0.615m) and the claw had to reach upward, which read as
+    // swatting rather than pinching.
+    hoverY: 0.34,
     magnetRadius: 2.4,     // emeems drift toward you inside this radius
     magnetStrength: 7.0,
     respawnDelay: 0.6,

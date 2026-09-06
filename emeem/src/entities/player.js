@@ -132,6 +132,7 @@ export function createPlayer(ctx) {
   group.name = 'player';
   const handHasUpdate = !!(hand && typeof hand.update === 'function');
   const handHasPinch = !!(hand && typeof hand.setPinch === 'function');
+  const handHasReach = !!(hand && typeof hand.setReach === 'function');
   if (ctx.scene) ctx.scene.add(group);
 
   // Reused every frame - hand.update() must not keep a reference to it.
@@ -499,6 +500,9 @@ export function createPlayer(ctx) {
 
     // Neutral relaxes toward wide open as the reach builds; the grab overrides
     // it outright, so a catch always closes no matter where the reach was.
+    // Two separate signals to the puppet: setReach drops it into the
+    // pincer-down posture, setPinch opens or shuts that pincer.
+    if (handHasReach) hand.setReach(p.reach);
     if (handHasPinch) hand.setPinch(Math.max(CLAW_NEUTRAL * (1 - p.reach), p.pinch));
 
     if (handHasUpdate) {
@@ -534,6 +538,7 @@ export function createPlayer(ctx) {
     prevGrounded = false;
 
     grabHold = 0;
+    if (handHasReach) hand.setReach(0);
     group.position.copy(p.pos);
     group.rotation.set(0, 0, 0);
     if (handHasPinch) hand.setPinch(CLAW_NEUTRAL);

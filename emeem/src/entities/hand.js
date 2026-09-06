@@ -42,6 +42,8 @@ const _dir = new THREE.Vector3();
 const _foot = new THREE.Vector3();
 const _tuck = new THREE.Vector3();
 const _tip = new THREE.Vector3();
+const _tipOpen = new THREE.Vector3();
+const _tipShut = new THREE.Vector3();
 const _pivot = new THREE.Vector3();
 const _invRig = new THREE.Matrix4();
 const _qA = new THREE.Quaternion();
@@ -72,7 +74,9 @@ const CADENCE_MAX = 4.6;
  * what stops the legs from over-extending at top speed. Above that speed the
  * feet do slide a little - the alternative is a 6 Hz leg buzz nobody can read.
  */
-const STRIDE_MAX = 0.36;
+// Shorter stride keeps the feet under the body instead of trailing out behind
+// it, which is the other half of the level, fingers-down carriage.
+const STRIDE_MAX = 0.26;
 /** Peak fingertip lift during the swing half of the cycle. */
 const LEG_LIFT = 0.17;
 /** Legs are offset by a third of a cycle each: a proper three-beat gait. */
@@ -84,7 +88,13 @@ const RUN_SPEED = 2.4;
 
 const BOB_AMP = 0.035;      // vertical body bob, metres (3 footfalls per cycle)
 const CROUCH = 0.055;       // how far the body sinks at full speed
-const LEAN_MAX = 0.24;      // forward pitch at full speed, radians
+/**
+ * Forward pitch at full speed, radians. Deliberately shallow: a real hand
+ * walking on its fingers keeps the back of the hand roughly LEVEL and drops the
+ * fingers straight down. At 0.24 the body reared with the wrist high and the
+ * legs trailing, which read as an animal rather than a hand.
+ */
+const LEAN_MAX = 0.09;
 const LUNGE = 0.055;        // metres the body shifts forward over its feet at speed
 const AIR_PITCH = 0.20;     // nose-up pitch while airborne
 const ROLL_AMP = 0.055;     // side-to-side body roll with the gait
@@ -92,6 +102,8 @@ const YAW_AMP = 0.045;      // body yaw wag with the gait
 const CLAW_BOB = 0.030;     // claw bounce with each footfall
 const CLAW_SWING = 0.045;   // claw reach oscillation over the stride
 const IDLE_BOB = 0.012;     // slow claw breathing when standing still
+const REACH_LERP = 9.0;     // how fast the body drops into the reaching pose
+const REACH_PITCH = -0.15;  // radians of extra nose-down dip at full reach
 
 /** How fast the airborne pose blends in/out (per second). */
 const AIR_LERP = 13.0;
@@ -388,6 +400,11 @@ export function createHand(threeArg, configArg) {
       openTip: new T.Vector3(-0.56 * U, STAND_Y - 0.14 * U, -0.66 * U),
       closedTip: new T.Vector3(-0.35 * U, STAND_Y - 0.13 * U, -0.80 * U),
       airTip: new T.Vector3(-0.64 * U, STAND_Y - 0.20 * U, -0.62 * U),
+      // Reaching down for an emeem: the thumb drops below the index and sits
+      // back from it, so the open gap is the diagonal pincer of a real pinch
+      // rather than two fingers side by side.
+      reachOpenTip: new T.Vector3(-0.52 * U, 0.46 * U, -0.62 * U),
+      reachShutTip: new T.Vector3(-0.40 * U, 0.34 * U, -0.74 * U),
       swayPhase: 0.0,
     },
     {
@@ -401,6 +418,10 @@ export function createHand(threeArg, configArg) {
       openTip: new T.Vector3(-0.28 * U, STAND_Y + 0.20 * U, -1.00 * U),
       closedTip: new T.Vector3(-0.35 * U, STAND_Y - 0.03 * U, -0.80 * U),
       airTip: new T.Vector3(-0.24 * U, STAND_Y + 0.32 * U, -1.02 * U),
+      // The index hangs furthest down and forward - it is the long half of the
+      // pincer, and it is what closes up onto the thumb.
+      reachOpenTip: new T.Vector3(-0.30 * U, 0.30 * U, -0.86 * U),
+      reachShutTip: new T.Vector3(-0.40 * U, 0.34 * U, -0.74 * U),
       swayPhase: 1.1,
     },
     {
@@ -485,6 +506,8 @@ export function createHand(threeArg, configArg) {
     } else {
       entry.openTip = spec.openTip;
       entry.closedTip = spec.closedTip;
+      entry.reachOpenTip = spec.reachOpenTip;
+      entry.reachShutTip = spec.reachShutTip;
       entry.airTip = spec.airTip;
       entry.swayPhase = spec.swayPhase;
       claw.push(entry);
@@ -525,6 +548,8 @@ export function createHand(threeArg, configArg) {
   let air = 0;          // 0 grounded .. 1 airborne, smoothed
   let pinch = 0;        // eased pinch actually applied
   let pinchTarget = 0;  // what setPinch() last asked for
+  let reach = 0;        // eased reach actually applied
+  let reachTarget = 0;  // what setReach() last asked for
 
   /**
    * @param {number} t 0 = claw wide open, 1 = thumb tip touching index tip.
@@ -533,6 +558,18 @@ export function createHand(threeArg, configArg) {
    */
   function setPinch(t) {
     pinchTarget = clamp01(Number.isFinite(t) ? t : 0);
+  }
+
+  /**
+   * @param {number} t 0 = normal running carriage, 1 = full reaching-down pose:
+   * the body pitches nose-down and the thumb and index drop into a pincer aimed
+   * at the ground, the way a hand actually poses to pick something up. The two
+   * are independent: `reach` says WHERE the claw is, `pinch` says whether it is
+   * open or shut, so a catch closes correctly at whatever height the reach put
+   * the tips.
+   */
+  function setReach(t) {
+    reachTarget = clamp01(Number.isFinite(t) ? t : 0);
   }
 
   /**
@@ -554,6 +591,10 @@ export function createHand(threeArg, configArg) {
     air = damp(air, grounded ? 0 : 1, AIR_LERP, step);
     if (air < 0.0005) air = 0;
     else if (air > 0.9995) air = 1;
+
+    reach = damp(reach, reachTarget, REACH_LERP, step);
+    if (reach < 0.0005) reach = 0;
+    else if (reach > 0.9995) reach = 1;
 
     pinch = damp(pinch, pinchTarget, pinchTarget > pinch ? PINCH_CLOSE : PINCH_OPEN, step);
     // Quadratic ease-out on top of the exponential: most of the travel happens
@@ -590,8 +631,11 @@ export function createHand(threeArg, configArg) {
     const trPos = TREMBLE_POS * U * fear;
     const trRot = TREMBLE_ROT * fear;
 
+    // Reaching tips the whole body nose-down. The rig pivots about the palm and
+    // the foot targets are pulled back through its inverse, so the feet stay
+    // planted while the front of the hand dips toward the ground.
     rig.rotation.set(
-      lean + noise(nt, 3) * trRot,
+      lean + REACH_PITCH * reach + noise(nt, 3) * trRot,
       wag + noise(nt, 4) * trRot,
       roll + noise(nt, 5) * trRot,
     );
@@ -650,9 +694,18 @@ export function createHand(threeArg, configArg) {
       // is, because the two forward fingers own the silhouette. The splay is
       // applied to the OPEN pose and the pinch closes from there, so a catch
       // made in mid-air still shuts the claw properly.
-      _tip.copy(f.openTip);
-      if (air > 0) _tip.lerp(f.airTip, air);
-      _tip.lerp(f.closedTip, pinchShaped);
+      // Build the open and shut targets separately, each already moved into the
+      // reaching pose, then interpolate between them by the pinch. Blending the
+      // reach in afterwards would drag a closing claw back up to the running
+      // carriage mid-catch.
+      _tipOpen.copy(f.openTip);
+      if (air > 0) _tipOpen.lerp(f.airTip, air);
+      if (reach > 0) _tipOpen.lerp(f.reachOpenTip, reach);
+
+      _tipShut.copy(f.closedTip);
+      if (reach > 0) _tipShut.lerp(f.reachShutTip, reach);
+
+      _tip.copy(_tipOpen).lerp(_tipShut, pinchShaped);
 
       // The claw rides the run: a bounce per footfall and a reach per stride.
       _tip.y += CLAW_BOB * U * moving * Math.sin(bobPhase + f.swayPhase);
@@ -671,5 +724,5 @@ export function createHand(threeArg, configArg) {
   // Pose it once so the very first rendered frame is a hand and not a T-pose.
   update(0, EMPTY_OPTS);
 
-  return { group, setPinch, update };
+  return { group, setPinch, setReach, update };
 }
