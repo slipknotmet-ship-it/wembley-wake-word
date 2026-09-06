@@ -656,7 +656,7 @@ export function buildFace(T = THREE_NS, C = DEFAULT_CONFIG) {
   const matLens = keepMat(new T.MeshStandardMaterial({
     color: 0x0b0d12, roughness: 0.14, metalness: 0.45,
     emissive: eyeColor.clone(), emissiveIntensity: 0.0,
-    transparent: true, opacity: 0.46, depthWrite: false,
+    transparent: true, opacity: 0.40, depthWrite: false,
   }));
 
   // ---------------------------------------------------------- emeem eyes ---
@@ -692,15 +692,36 @@ export function buildFace(T = THREE_NS, C = DEFAULT_CONFIG) {
     return geo;
   }
 
-  function makeEyeMat(hex) {
+  /**
+   * Disc and pupil need SEPARATE materials, not one material with a baked
+   * vertex colour.
+   *
+   * `emissive` is a uniform: three.js does not multiply it by the vertex
+   * colour. So a single material with the disc's glow lit the pupil just as
+   * brightly, and behind a dark tinted lens - which compresses contrast
+   * uniformly - the pupil disappeared entirely. The darker the pupil's diffuse
+   * got, the less difference it made, because the glow was doing the work.
+   *
+   * Two materials: the disc glows to punch through the tint, the pupil barely
+   * glows at all, and the ratio between them survives the glass.
+   */
+  function makeEyeDiscMat(hex) {
     return keepMat(new T.MeshStandardMaterial({
-      color: hex, vertexColors: true, roughness: 0.52, metalness: 0.0,
-      // Lit from within just enough to carry through the tint and through fog.
-      emissive: new T.Color(hex), emissiveIntensity: 0.44,
+      color: hex, roughness: 0.52, metalness: 0.0,
+      emissive: new T.Color(hex), emissiveIntensity: 0.50,
     }));
   }
-  const matEyeL = makeEyeMat(eyeToneL);
-  const matEyeR = makeEyeMat(eyeToneR);
+  function makeEyePupilMat(hex) {
+    const dark = new T.Color(hex).multiplyScalar(EYE_PUPIL_SHADE);
+    return keepMat(new T.MeshStandardMaterial({
+      color: dark, roughness: 0.62, metalness: 0.0,
+      emissive: dark.clone(), emissiveIntensity: 0.05,
+    }));
+  }
+  const matEyeL = makeEyeDiscMat(eyeToneL);
+  const matEyeR = makeEyeDiscMat(eyeToneR);
+  const matPupilL = makeEyePupilMat(eyeToneL);
+  const matPupilR = makeEyePupilMat(eyeToneR);
   // Additive, fog-exempt: at full dread this is the last thing you can still
   // see of it, two red coals behind the lenses.
   const matGlow = keepMat(new T.MeshBasicMaterial({
@@ -1010,34 +1031,40 @@ export function buildFace(T = THREE_NS, C = DEFAULT_CONFIG) {
     // Squash along Z, not Y: on the chest, Z is the depth axis, so this is the
     // same flattened candy-button profile the collectible has.
     eyeBase.scale(1, 1, 0.45);
-    paintShade(eyeBase, 1);
     // The tip is the whole reason an emeem is recognisable, and on a face it
     // doubles as the pupil. At 0.30 of the disc and the collectible's own 0.78
     // shade it vanished behind the tint - the eyes read as two blank discs.
     // Bigger, prouder, and much darker, so it reads as a dot at any distance.
-    const eyeTip = new T.SphereGeometry(EYE_R * 0.44, 12, 9);
-    // Flatter than the collectible's tip. The glasses sit ON the chest, so
-    // there is barely a centimetre of socket behind the lens; a proud tip
-    // simply cannot fit behind the glass and breaks through it instead. The
-    // pupil reads from its darkness and its size, not from its relief.
+    // Pupil geometry. It must clear the DISC's own dome, which reaches 0.45*R
+    // forward: at an offset of 0.16*R the pupil sat inside its own eyeball and
+    // rendered as nothing at all, which is not a shading problem and cannot be
+    // fixed by darkening it.
+    const eyeTip = new T.SphereGeometry(EYE_R * 0.50, 12, 9);
     eyeTip.scale(1, 1, 0.55);
-    // NEGATIVE z. The creature faces -Z, so the pupil has to protrude that way;
-    // translating it +Z buried it inside the disc and the eyes rendered blank.
-    eyeTip.translate(0, 0, -EYE_R * 0.16);
-    paintShade(eyeTip, EYE_PUPIL_SHADE);
-    // Seated BEHIND the glass, not on it. Measured: at standoff -0.030 the
-    // eyeball spanned z -0.511..-0.295 against a lens front of -0.494, so its
-    // protruding tip broke through the lens plane and the eye read as painted
-    // on the outside. A deeper standoff sinks the whole eyeball into the
-    // socket so the tinted lens composites over all of it.
-    const geoEye = keepGeo(layOnChest(
-      mergeGeometries([eyeBase, eyeTip], false),
-      side * LENS_CX, FRAME_STANDOFF - 0.056));
-    eyeBase.dispose();
-    eyeTip.dispose();
+    eyeTip.translate(0, 0, -EYE_R * 0.34);
+
+    // Disc and pupil are SEPARATE meshes with SEPARATE materials, not one mesh
+    // with a baked vertex colour. `emissive` is a uniform and three.js does not
+    // multiply it by the vertex colour, so a single material carrying the
+    // disc's glow lit the pupil exactly as brightly - and behind a tinted lens,
+    // which compresses contrast uniformly, the pupil disappeared. Splitting
+    // them keeps the disc bright enough to punch through the tint while the
+    // pupil stays dark.
+    //
+    // Both are seated at the same depth, which is checked geometrically: the
+    // pupil must sit proud of the disc but still behind the lens front, and the
+    // window between those two is only a few millimetres wide.
+    const EYE_STANDOFF = FRAME_STANDOFF - 0.076;
+
+    const geoEye = keepGeo(layOnChest(eyeBase, side * LENS_CX, EYE_STANDOFF));
     const eyeball = new T.Mesh(geoEye, side < 0 ? matEyeL : matEyeR);
     eyeball.castShadow = false;
     brow.add(eyeball);
+
+    const geoPupil = keepGeo(layOnChest(eyeTip, side * LENS_CX, EYE_STANDOFF));
+    const pupil = new T.Mesh(geoPupil, side < 0 ? matPupilL : matPupilR);
+    pupil.castShadow = false;
+    brow.add(pupil);
 
     const lens = new T.Mesh(geoLens, matLens);
     lens.renderOrder = 2;   // draw after the eyeball so the tint composites over it
