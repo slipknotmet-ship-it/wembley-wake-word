@@ -677,6 +677,12 @@ export function buildFace(T = THREE_NS, C = DEFAULT_CONFIG) {
   const eyeToneL = EYE_TONES[0] ?? 0xf2c4b3;
   const eyeToneR = EYE_TONES[1] ?? 0xe8a894;
   const EYE_TIP_SHADE = PAL.emeemTipShade ?? 0.78;
+  /**
+   * The eye tip is shaded far darker than a collectible emeem's. On the ground
+   * the tip only needs to be distinguishable; on a face it has to read as a
+   * PUPIL from across the map, which needs real contrast against the pale disc.
+   */
+  const EYE_PUPIL_SHADE = 0.34;
 
   function paintShade(geo, shade) {
     const n = geo.attributes.position.count;
@@ -999,16 +1005,22 @@ export function buildFace(T = THREE_NS, C = DEFAULT_CONFIG) {
     // The emeem eyeball, seated behind the glass. Authored in XY like every
     // other chest decal, then pushed onto the chest surface by layOnChest at a
     // deeper standoff than the lens so it sits INSIDE the glasses.
-    const EYE_R = LENS_H * 0.40;
+    const EYE_R = LENS_H * 0.44;
     const eyeBase = new T.SphereGeometry(EYE_R, 16, 12);
     // Squash along Z, not Y: on the chest, Z is the depth axis, so this is the
     // same flattened candy-button profile the collectible has.
     eyeBase.scale(1, 1, 0.45);
     paintShade(eyeBase, 1);
-    const eyeTip = new T.SphereGeometry(EYE_R * 0.30, 10, 8);
-    eyeTip.scale(1, 1, 1.25);
-    eyeTip.translate(0, 0, EYE_R * 0.36);
-    paintShade(eyeTip, EYE_TIP_SHADE);
+    // The tip is the whole reason an emeem is recognisable, and on a face it
+    // doubles as the pupil. At 0.30 of the disc and the collectible's own 0.78
+    // shade it vanished behind the tint - the eyes read as two blank discs.
+    // Bigger, prouder, and much darker, so it reads as a dot at any distance.
+    const eyeTip = new T.SphereGeometry(EYE_R * 0.44, 12, 9);
+    eyeTip.scale(1, 1, 1.35);
+    // NEGATIVE z. The creature faces -Z, so the pupil has to protrude that way;
+    // translating it +Z buried it inside the disc and the eyes rendered blank.
+    eyeTip.translate(0, 0, -EYE_R * 0.44);
+    paintShade(eyeTip, EYE_PUPIL_SHADE);
     const geoEye = keepGeo(layOnChest(
       mergeGeometries([eyeBase, eyeTip], false),
       side * LENS_CX, FRAME_STANDOFF - 0.030));

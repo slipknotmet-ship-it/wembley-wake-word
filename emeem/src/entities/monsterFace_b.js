@@ -351,11 +351,10 @@ export function buildFace(T = THREE_NS, C = DEFAULT_CONFIG) {
       n -= pr.mawDepth * Math.pow(inside, 1.1) * fw;
       // The aperture SPLITS: flesh above the line rides up, flesh below rides
       // down. Depth alone reads as a stain; the vertical split is what reads as
-      // a mouth coming open.
-      // The gape is deliberately lopsided. This creature's chin is the
-      // waistband of its shorts and its nose is only 33cm above the fold, so
-      // the opening is biased upward - it eats its own navel before it reaches
-      // the elastic, which is the correct thing for it to do.
+      // a mouth coming open. It is deliberately lopsided, because this thing's
+      // chin is the waistband of its shorts and its nose is only 33cm above the
+      // fold: the gape is biased upward so it eats its own navel before it
+      // reaches the elastic, which is the correct thing for it to do.
       const split = ay < -1 ? -1 : ay > 1 ? 1 : ay;
       const asym = split > 0 ? 1.12 : 0.88;
       off.y += pr.jawDrop * split * asym * (1 - smoothstep(1.0, 2.1, r)) * fw;
@@ -656,6 +655,7 @@ export function buildFace(T = THREE_NS, C = DEFAULT_CONFIG) {
   const matGlow = keepMat(new T.MeshBasicMaterial({
     color: eyeColor.clone(), transparent: true, opacity: 0.0, depthWrite: false,
     blending: T.AdditiveBlending, fog: false, side: T.DoubleSide,
+    vertexColors: true,
   }));
   const matTooth = keepMat(new T.MeshStandardMaterial({
     color: 0xd8c9b0, roughness: 0.55, metalness: 0.0, flatShading: true,
@@ -888,6 +888,27 @@ export function buildFace(T = THREE_NS, C = DEFAULT_CONFIG) {
   }
 
   /**
+   * Bakes a radial 1 -> 0 ramp into a plane's vertex colours, measured in units
+   * of its own half-extent so the fade is elliptical rather than circular.
+   */
+  function radialFade(geo) {
+    const p = geo.attributes.position;
+    let hx = 1e-5, hy = 1e-5;
+    for (let k = 0; k < p.count; k++) {
+      hx = Math.max(hx, Math.abs(p.getX(k)));
+      hy = Math.max(hy, Math.abs(p.getY(k)));
+    }
+    const col = new Float32Array(p.count * 3);
+    for (let k = 0; k < p.count; k++) {
+      const r = Math.hypot(p.getX(k) / hx, p.getY(k) / hy);
+      const v = Math.pow(clamp01(1 - r), 1.35);
+      col[k * 3] = v; col[k * 3 + 1] = v; col[k * 3 + 2] = v;
+    }
+    geo.setAttribute('color', new T.BufferAttribute(col, 3));
+    return geo;
+  }
+
+  /**
    * A filled rounded rectangle, subdivided from the centre outward.
    *
    * ExtrudeGeometry cannot be used for the lens: it triangulates a filled shape
@@ -989,11 +1010,12 @@ export function buildFace(T = THREE_NS, C = DEFAULT_CONFIG) {
     const lens = new T.Mesh(geoLens, matLens);
     brow.add(lens);
 
-    // The coal behind the glass. It sits in FRONT of the lens face but BEHIND
-    // the frame's front plane, so the depth test clips it to the aperture: the
-    // glow fills the lens and stops dead at the rim.
+    // The coal behind the glass. Additive, fog-exempt and depth-write-free, and
+    // its falloff is baked into VERTEX COLOURS rather than a texture: black at
+    // the rim means the additive blend contributes nothing there, so the halo
+    // fades out over the frame instead of ending in a hard red rectangle.
     const geoGlow = keepGeo(layOnChest(
-      new T.PlaneGeometry(LENS_W * 0.98, LENS_H * 1.02, 3, 3),
+      radialFade(new T.PlaneGeometry(LENS_W * 1.18, LENS_H * 1.30, 6, 5)),
       side * LENS_CX, FRAME_STANDOFF - 0.002));
     const glow = new T.Mesh(geoGlow, matGlow);
     glow.renderOrder = 3;
@@ -1106,11 +1128,16 @@ export function buildFace(T = THREE_NS, C = DEFAULT_CONFIG) {
     teethUpper.visible = show;
     teethLower.visible = show;
     if (show) {
-      const drop = MAW.jawDrop * maw * 0.86;
-      const outY = MOUTH_Y - HIP_Y;
+      // Planted where the funnel is actually OPEN, which is nearer the mouth's
+      // centre than its rim: the morph hauls the rim flesh up and out into a
+      // lip, so a tooth placed level with the lip is simply behind it. These
+      // two factors are the lopsided jaw drop (1.15 up, 0.95 down) tuned until
+      // both rows stood clear of the throat at full gape.
+      const drop = MAW.jawDrop * maw;
+      const outY = MOUTH_Y - 0.02 - HIP_Y;
       const z = -0.455 - 0.055 * maw;
-      teethUpper.position.set(0, outY + drop, z);
-      teethLower.position.set(0, outY - drop, z);
+      teethUpper.position.set(0, outY + drop * 1.15, z);
+      teethLower.position.set(0, outY - drop * 0.95, z);
       teethUpper.scale.setScalar(reveal);
       teethLower.scale.setScalar(reveal);
     }
@@ -1118,7 +1145,7 @@ export function buildFace(T = THREE_NS, C = DEFAULT_CONFIG) {
     // ------------------------------------------------------- lens glow
     const heat = smoothstep(0.42, 1.0, anger);
     const pulse = 1 + 0.22 * Math.sin(clock * (3 + 8 * lastProx)) * (0.3 + 0.7 * lastProx);
-    matGlow.opacity = clamp01(heat * (0.22 + 0.40 * lastProx) * pulse);
+    matGlow.opacity = clamp01(heat * (0.40 + 0.55 * lastProx) * pulse);
     matLens.emissiveIntensity = heat * 0.85 * pulse;
     const gs = 1 + 0.18 * heat + 0.12 * lastProx;
     browL.glow.scale.set(gs, gs, 1);
@@ -1133,7 +1160,7 @@ export function buildFace(T = THREE_NS, C = DEFAULT_CONFIG) {
       matSkin.color.copy(_colA.copy(skinBase).lerp(skinFlush, f));
       matLimb.color.copy(_colB.copy(limbBase).lerp(limbFlush, f));
       // a last ember of self-illumination so the flush survives dread fog
-      const e = 0.13 * smoothstep(0.55, 1.0, anger);
+      const e = 0.07 * smoothstep(0.55, 1.0, anger);
       matSkin.emissive.setRGB(e * eyeColor.r, e * eyeColor.g * 0.35, e * eyeColor.b * 0.3);
       matLimb.emissive.copy(matSkin.emissive);
     }

@@ -545,12 +545,12 @@ export function buildFace(THREE_, CONFIG) {
    *
    *   yLine(u) = yc + rise*a  -  arc(a)*u^2  -  corner(a)*|u|^5
    *
-   * The u^2 term bows the whole line into a frown. The |u|^5 term is flat
-   * across the middle and then plunges - that is depressor anguli oris, the
-   * muscle that hauls the corners of a real angry mouth down, and separating it
-   * from the arc is what lets a faint sag and a savage scowl be the same
-   * equation. Width, lip thickness, pout and gape are their own terms again, so
-   * nothing here is a keyframe: it is all one continuous surface in anger.
+   * u^2 bows the whole line; |u|^5 hauls the corners down on top of it (see the
+   * ARC/COR note at the constants for why the split matters and which one has
+   * to carry the drop). Width, lip thickness, pout and gape are each their own
+   * term again, so nothing here is a keyframe or a blend between two authored
+   * poses: it is one continuous surface in anger, and any value in 0..1 is as
+   * valid a face as the endpoints.
    */
   const writeMouth = (a, open) => {
     const hw = MOUTH_HW0 + MOUTH_HW_A * a;
