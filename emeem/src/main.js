@@ -14,6 +14,30 @@ import { createAudio } from './audio/sfx.js';
 const canvas = document.getElementById('game-canvas');
 const uiRoot = document.getElementById('ui-root');
 
+/**
+ * Three.js needs WebGL2. Every phone that matters has it - Android since 2017,
+ * iOS since 15 in 2021 - but a device without it would otherwise render a black
+ * screen and an error only a developer would ever see. Say so in words instead.
+ */
+function hasWebGL2() {
+  try {
+    return !!document.createElement('canvas').getContext('webgl2');
+  } catch {
+    return false;
+  }
+}
+if (!hasWebGL2()) {
+  uiRoot.innerHTML =
+    '<div style="position:fixed;inset:0;display:grid;place-content:center;gap:10px;' +
+    'text-align:center;padding:28px;background:#0b0510;color:#f2c4b3;' +
+    'font:600 17px/1.5 system-ui,-apple-system,sans-serif">' +
+    '<div style="font-size:34px">\u{1F90F}</div>' +
+    '<div>Emeem needs WebGL2, which this browser does not support.</div>' +
+    '<div style="opacity:.62;font-weight:500;font-size:14px">' +
+    'On iPhone that means iOS 15 or newer; on Android, Chrome or Firefox.</div></div>';
+  throw new Error('WebGL2 unavailable');
+}
+
 // ---------------------------------------------------------------- bootstrap
 const bus = createBus();
 const engine = createRenderer(canvas);

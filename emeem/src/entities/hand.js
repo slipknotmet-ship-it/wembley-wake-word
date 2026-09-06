@@ -109,15 +109,28 @@ const CLAW_BOB = 0.030;     // claw bounce with each footfall
 const CLAW_SWING = 0.045;   // claw reach oscillation over the stride
 const IDLE_BOB = 0.012;     // slow claw breathing when standing still
 const REACH_LERP = 5.5;     // how fast the body eases into the reaching pose
+
+/**
+ * Squash and stretch on the grab.
+ *
+ * At gameplay distance the hand is about 15% of screen height, and a pose
+ * change alone - however correct - is a few pixels of difference. Scaling the
+ * whole body is the classic answer because it changes the SILHOUETTE, which
+ * survives being small, being in fog, and being glanced at while something is
+ * chasing you. The body stretches tall as it rises into the reach, then snaps
+ * squat and wide as the claw shuts.
+ */
+const REACH_STRETCH = 0.20;  // fraction taller (and narrower) at full reach
+const GRAB_SQUASH = 0.26;    // fraction shorter (and wider) at full pinch
 // Rears back as it lifts, so the pincer is presented forward and up rather than
 // buried under the palm.
-const REACH_PITCH = 0.30;
+const REACH_PITCH = 0.46;
 /**
  * Metres the body RISES as it reaches. Walking is five fingertips on the
  * ground; taking an emeem lifts the hand up off them into the pincer, which is
  * the whole silhouette change that makes a catch readable at gameplay distance.
  */
-const REACH_LIFT = 0.30;
+const REACH_LIFT = 0.58;
 
 /**
  * A curled finger is NOT an IK problem.
@@ -726,6 +739,12 @@ export function createHand(threeArg, configArg) {
     // floor: `position = p - R*p + t` rotates the body in place. With the naive
     // origin pivot a 14 degree lean swings the claw a third of a metre toward
     // the ground, because the claw is a metre out along the moment arm.
+    // Volume-preserving squash/stretch: what the body gains in height it loses
+    // in width, so it reads as a living thing compressing rather than as an
+    // object being resized.
+    const stretch = REACH_STRETCH * reach - GRAB_SQUASH * pinchShaped;
+    rig.scale.set(1 - stretch * 0.55, 1 + stretch, 1 - stretch * 0.55);
+
     _pivot.set(0, STAND_Y, 0).applyQuaternion(rig.quaternion);
     rig.position.set(
       -_pivot.x + noise(nt, 0) * trPos,

@@ -102,12 +102,22 @@ const before = await page.evaluate(() => {
 });
 
 // Run forward with a couple of jumps and a strafe, on the keyboard fallback.
+// Jumping while airborne is correctly refused, and the player spawns above the
+// ground, so every jump has to wait for the feet to be down first. Under
+// software rasterisation that fall takes over a second of wall time - long
+// enough that a fixed sleep tests the fall instead of the button.
+const onGround = () => page.waitForFunction(
+  () => window.__EMEEM__.state.player.grounded === true, null, { timeout: 30000 });
+
+await onGround();
 await page.keyboard.down('ArrowUp');
 await sleep(1500);
-await page.keyboard.down('Space'); await sleep(120); await page.keyboard.up('Space');
+await onGround();
+await page.keyboard.down('Space'); await sleep(150); await page.keyboard.up('Space');
 await sleep(900);
 await page.keyboard.down('ArrowRight'); await sleep(1200); await page.keyboard.up('ArrowRight');
-await page.keyboard.down('Space'); await sleep(120); await page.keyboard.up('Space');
+await onGround();
+await page.keyboard.down('Space'); await sleep(150); await page.keyboard.up('Space');
 await sleep(2500);
 await page.screenshot({ path: `${SHOTS}/02-gameplay.png` });
 await sleep(2500);
