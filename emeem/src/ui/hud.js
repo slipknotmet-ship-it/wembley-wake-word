@@ -233,9 +233,10 @@ const CSS = `
   letter-spacing:.24em; text-transform:uppercase; color:rgba(255,180,180,.6); font-weight:700; }
 /* --- the Protector's portrait, left edge ------------------------------- */
 .emhud-port{
-  /* Top-left under the score. Mid-left put it straight on top of the D-pad,
-     which is the one place on this screen a thumb is guaranteed to be. */
-  position:absolute; left:calc(var(--safe-l, 0px) + 10px);
+  /* Top-RIGHT, under the best score. The left side belongs to the D-pad, and
+     the jump button owns the bottom right, so this corner is the one piece of
+     the screen no thumb ever covers. */
+  position:absolute; right:calc(var(--safe-r, 0px) + 10px);
   top:calc(var(--safe-t, 0px) + 52px);
   display:flex; flex-direction:column; align-items:center; gap:5px;
   pointer-events:none;
