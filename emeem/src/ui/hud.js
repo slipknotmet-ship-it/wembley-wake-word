@@ -231,6 +231,58 @@ const CSS = `
 }
 .emhud-tomb{ margin-top:clamp(4px,1.2vh,9px); font-size:clamp(9px,2.2vh,12px);
   letter-spacing:.24em; text-transform:uppercase; color:rgba(255,180,180,.6); font-weight:700; }
+/* --- the Protector's portrait, left edge ------------------------------- */
+.emhud-port{
+  /* Top-left under the score. Mid-left put it straight on top of the D-pad,
+     which is the one place on this screen a thumb is guaranteed to be. */
+  position:absolute; left:calc(var(--safe-l, 0px) + 10px);
+  top:calc(var(--safe-t, 0px) + 52px);
+  display:flex; flex-direction:column; align-items:center; gap:5px;
+  pointer-events:none;
+}
+.emhud-portframe{
+  position:relative; width:104px; height:104px; border-radius:14px;
+  /* The border is the threat readout: it heats up as he closes. */
+  border:2px solid rgba(255,255,255,.22);
+  box-shadow:0 4px 18px rgba(0,0,0,.45);
+  /* No fill. The renderer scissors the live portrait into this exact rectangle
+     of the canvas UNDERNEATH, so any background here paints over it - which is
+     precisely what made the panel render as a black square. */
+  background:transparent;
+  transition:border-color .25s linear, box-shadow .25s linear;
+}
+/* The hole is genuinely empty - the renderer scissors the live portrait into
+   exactly this rectangle, so nothing may be painted over it. */
+.emhud-porthole{ position:absolute; inset:0; border-radius:12px; overflow:hidden; }
+.emhud-portring{
+  position:absolute; inset:-13px; border-radius:20px; pointer-events:none;
+}
+/* A needle on the ring, pointing where he is relative to the way you face.
+   Straight up means dead ahead; straight down means directly behind you. */
+.emhud-needle{
+  position:absolute; left:50%; top:50%; width:0; height:0;
+  transform-origin:0 0; will-change:transform;
+  /* An explicit resting colour: the needle is tinted from JS only when
+     proximity MOVES, so at the start of a run it would otherwise inherit
+     whatever currentColor happened to be. */
+  color:#fff;
+}
+.emhud-needle::before{
+  content:''; position:absolute; left:-7px; top:-72px;
+  border-left:7px solid transparent; border-right:7px solid transparent;
+  border-bottom:13px solid currentColor;
+  filter:drop-shadow(0 1px 3px rgba(0,0,0,.6));
+}
+.emhud-portdist{
+  font:700 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+  letter-spacing:.06em; color:#fff; opacity:.78;
+  text-shadow:0 1px 3px rgba(0,0,0,.7); font-variant-numeric:tabular-nums;
+}
+@media (max-height:400px){
+  .emhud-portframe{ width:82px; height:82px; }
+  .emhud-needle::before{ top:-60px; }
+}
+
 .emhud-scores{
   display:flex; align-items:flex-end; justify-content:center;
   gap:clamp(18px,6vw,44px); margin-top:clamp(8px,2.4vh,18px);
@@ -341,6 +393,22 @@ export function createHUD(uiRootEl, ctx) {
   const scoreWrap = el('div', 'emhud-scorewrap', scoreBox);
   const scoreGlow = el('div', 'emhud-scoreglow', scoreWrap);
   const scoreNum = el('div', 'emhud-scorenum', scoreWrap, '0');
+
+  /**
+   * The Protector's portrait, left edge.
+   *
+   * Two jobs, because they are the same question. The frame is an empty hole
+   * that the renderer draws a live head-and-shoulders of the creature into, so
+   * you can watch his face escalate without turning round - which the
+   * fixed-heading camera does not let you do. Around it, a needle points at
+   * where he actually IS, so you know which way to run.
+   */
+  const port = el('div', 'emhud-port', layer);
+  const portFrame = el('div', 'emhud-portframe', port);
+  const portHole = el('div', 'emhud-porthole', portFrame);   // the WebGL inset
+  const portRing = el('div', 'emhud-portring', portFrame);
+  const portNeedle = el('div', 'emhud-needle', portRing);
+  const portDist = el('div', 'emhud-portdist', port, '--m');
 
   // best, top-right
   const bestBox = el('div', 'emhud-best', layer);
@@ -512,12 +580,72 @@ export function createHUD(uiRootEl, ctx) {
   }
 
   // ------------------------------------------------------------- update ---
+  // Portrait/bearing memos, so the DOM is only touched when a value moves.
+  let prevBearing = 1e9;
+  let prevDist = -1;
+  let prevProx = -1;
+  let portTick = 0;
+
   function update(dt, c) {
     const s = (c && c.state) || stateRef;
     if (!s) return;
     const step = Number.isFinite(dt) ? Math.min(Math.max(dt, 0), 0.1) : 0;
 
     const playing = s.phase === 'playing';
+
+    // --- the Protector's portrait and bearing -----------------------------
+    // Hand the renderer the hole's rectangle in CSS pixels. Measured rather
+    // than assumed, so the inset tracks the safe-area insets and the shorter
+    // layout on a small screen without the two ever disagreeing.
+    portTick -= step;
+    if (portTick <= 0) {
+      portTick = 0.25;
+      const eng = c && c.engine;
+      if (eng && eng.setPortraitRect) {
+        if (playing) {
+          const r = portHole.getBoundingClientRect();
+          eng.setPortraitRect({ x: r.left, y: r.top, w: r.width, h: r.height });
+        } else {
+          eng.setPortraitRect(null);   // no inset over the menu or the game-over card
+        }
+      }
+    }
+
+    if (playing) {
+      const dx = s.monster.pos.x - s.player.pos.x;
+      const dz = s.monster.pos.z - s.player.pos.z;
+      // Bearing relative to the way the player faces, which with a fixed-heading
+      // camera is always screen-up = -Z. 0 is dead ahead, +90 is off to the
+      // right, 180 is directly behind you.
+      const bearing = Math.atan2(dx, -dz) * 180 / Math.PI;
+      if (Math.abs(bearing - prevBearing) > 0.8) {
+        prevBearing = bearing;
+        portNeedle.style.transform = `rotate(${bearing.toFixed(1)}deg)`;
+      }
+
+      const dist = Math.hypot(dx, dz);
+      const shown = dist < 100 ? Math.round(dist) : 99;
+      if (shown !== prevDist) {
+        prevDist = shown;
+        portDist.textContent = `${shown}m`;
+      }
+
+      // Frame and needle heat together with proximity: white and calm when he
+      // is far, hot and glowing when he is on you. Colour is the cheap channel
+      // that survives being small.
+      const prox = clamp01(s.monster.proximity);
+      if (Math.abs(prox - prevProx) > 0.02) {
+        prevProx = prox;
+        const heat = Math.round(24 + 231 * prox);
+        const cool = Math.round(255 - 210 * prox);
+        const col = `rgb(${heat > 255 ? 255 : 255},${cool},${cool})`;
+        portFrame.style.borderColor = prox > 0.02
+          ? `rgba(${255},${cool},${cool},${(0.24 + 0.66 * prox).toFixed(2)})`
+          : 'rgba(255,255,255,.22)';
+        portFrame.style.boxShadow = `0 4px 18px rgba(0,0,0,.45), 0 0 ${Math.round(26 * prox)}px rgba(255,60,40,${(0.55 * prox).toFixed(2)})`;
+        portNeedle.style.color = col;
+      }
+    }
 
     // --- score punch ------------------------------------------------------
     const score = s.score | 0;

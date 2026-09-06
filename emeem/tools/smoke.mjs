@@ -149,7 +149,33 @@ check('player is on the ground, not falling forever', after.pos[1] > -2 && after
 check('world streamed obstacles', after.colliders > 20, `${after.colliders} colliders`);
 check('monster is chasing', after.monsterDist < 60 && after.monsterDist > 0, `${after.monsterDist.toFixed(1)}m away`);
 check('no NaN in physics state', after.finite);
-check('emeems are collectable', after.score > 0, `score ${after.score}`);
+// Collecting is not something to hope happens during a fixed drive: emeems sit
+// roughly 8.5m apart and the scripted path may simply miss them, which made this
+// check fail at random. Steer at the nearest one and wait for the score to move.
+const collected = await page.evaluate(() => new Promise((res) => {
+  const g = window.__EMEEM__;
+  const s = g.state;
+  const start = s.score;
+  const t0 = performance.now();
+  const tick = () => {
+    if (s.score > start) return res({ ok: true, score: s.score });
+    if (performance.now() - t0 > 30000) return res({ ok: false, score: s.score });
+    // Drive straight at whatever emeem.js currently reports as nearest.
+    if (s.player.hasNearestEmeem) {
+      const dx = s.player.nearestEmeem.x - s.player.pos.x;
+      const dz = s.player.nearestEmeem.z - s.player.pos.z;
+      const d = Math.hypot(dx, dz) || 1;
+      s.input.x = dx / d;
+      s.input.z = -dz / d;      // input.z is +1 for -Z, hence the sign
+    } else {
+      s.input.x = 0; s.input.z = 1;
+    }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}));
+await page.evaluate(() => { window.__EMEEM__.state.input.x = 0; window.__EMEEM__.state.input.z = 0; });
+check('emeems are collectable', collected.ok, `score ${collected.score}`);
 
 // --------------------------------------- escalation + game over paths
 await page.evaluate(() => {

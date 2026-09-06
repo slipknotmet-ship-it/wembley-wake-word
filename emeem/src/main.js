@@ -91,8 +91,14 @@ function startRun() {
   ctx.audio.resume();
   ctx.world.reset();
   player.reset();
-  emeems.reset();
+  // monster.reset() BEFORE emeems.reset(). resetState() parks the monster at
+  // -spawnDistance, but reset() is what actually puts it BEHIND the player at
+  // +spawnDistance - so seeding the field first tested the "no bait in its
+  // jaws" keep-out against a mirror image of where it really is, punching a
+  // dead zone ahead of the player and occasionally seeding an emeem directly
+  // underneath the Protector.
   monster.reset();
+  emeems.reset();
   engine.reset();
   hud.hideOverlays();
 }
@@ -115,6 +121,14 @@ function frame(now) {
   dt = Math.min(dt, CONFIG.render.maxDelta);
   state.dt = dt;
 
+  // Exactly ONCE per frame, before the phase branch. It owns the smoothing of
+  // state.dread and both the world and the emeems tint themselves from that,
+  // so it must lead them - and an earlier arrangement called it inside the
+  // branch AND again below, which on the frame you died ran it twice: two
+  // camera lerp steps, two dread steps, and the death shake decayed before it
+  // was ever drawn.
+  engine.update(dt, ctx);
+
   if (state.phase === 'playing') {
     state.time += dt;
     state.stats.runTime = state.time;
@@ -125,18 +139,24 @@ function frame(now) {
       player.fixedUpdate(FIXED, ctx);
       monster.fixedUpdate(FIXED, ctx);
       acc -= FIXED;
+      // The Protector can catch you INSIDE this loop. Stop the moment it does,
+      // or the rest of the frame keeps simulating a run that is already over:
+      // you could take an emeem on the frame you died, arriving after the death
+      // card had been built from the old score - so the point you died for was
+      // dropped from the card and from the best written to localStorage, and a
+      // level-up banner could ghost across the game-over scrim.
+      if (state.phase !== 'playing') break;
     }
-    // engine.update() FIRST: it owns the smoothing of state.dread, and both the
-    // world and the emeems tint themselves from that value. Updating them ahead
-    // of it left their colours trailing the sky and fog by one frame.
-    engine.update(dt, ctx);
     ctx.world.update(dt, ctx);
     emeems.update(dt, ctx);
   }
 
   player.update(dt, ctx);
   monster.update(dt, ctx);
-  if (state.phase !== 'playing') engine.update(dt, ctx);
+  // Pickup flashes and the crush animation have to keep playing after a death,
+  // or the last emeem you dived for hangs frozen mid-burst behind the game-over
+  // card until you restart.
+  if (state.phase !== 'playing') emeems.update(dt, ctx);
   hud.update(dt, ctx);
   ctx.audio.update(dt, ctx);
 

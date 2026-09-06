@@ -43,7 +43,7 @@ export const CONFIG = {
     // Height of the pincer above the feet once the hand has lifted. The grab
     // point tracks from emeem.hoverY up to this as the reach builds, so an
     // emeem is drawn up into the raised claw instead of to the ground.
-    pinchHeight: 0.62,
+    pinchHeight: 0.96,
     // Snap shut fast, hold, then release SLOWLY. Equal rates in both
     // directions read as a twitch rather than as a grab.
     pinchReleaseRate: 3.4, // how fast it relaxes back to neutral afterwards

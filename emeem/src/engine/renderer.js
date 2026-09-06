@@ -429,8 +429,158 @@ export function createRenderer(canvasEl) {
   }
 
   // -------------------------------------------------------------- render
+  // ------------------------------------------------------------- portrait
+  /**
+   * A live head-and-shoulders render of the Protector, drawn as a small inset
+   * over the main frame so the player can watch his face escalate without
+   * turning round - which the fixed-heading camera does not let them do.
+   *
+   * It is a second pass over the SAME scene rather than a second scene, so the
+   * subject is lit by the same sun and carries the same expression it has in
+   * the world. The cost is kept low by rendering only layer PORTRAIT_LAYER:
+   * the monster enables that layer on itself, everything else stays on layer 0
+   * and is skipped entirely, so the pass draws one creature into a ~110px box.
+   */
+  const PORTRAIT_LAYER = 1;
+  /** Radians off dead-on, so the portrait catches the key light. */
+  const PORTRAIT_AZIMUTH = -0.34;
+  const PORTRAIT_KEY = 3.1;
+  const PORTRAIT_FILL = 1.5;
+  const portraitCam = new THREE.PerspectiveCamera(30, 1, 0.05, 40);
+  portraitCam.layers.set(PORTRAIT_LAYER);
+  const portraitBg = new THREE.Color(0x140a12);
+
+  /**
+   * A key light that exists only for the portrait.
+   *
+   * Boosting the sun does nothing here: the creature's face is on its CHEST and
+   * its chest faces the player, while the sun deliberately sits behind the
+   * player so the world is front-lit. The portrait is therefore looking at the
+   * one surface the sun never reaches, and a brighter sun just brightens its
+   * back.
+   *
+   * Its layers are set to the portrait layer, so it can only ever touch the
+   * creature. It stays in the scene permanently at ZERO intensity and is only
+   * turned up for the pass - toggling `visible` would change the light count
+   * and make three.js recompile every material in the scene, every frame.
+   */
+  const portraitKey = new THREE.DirectionalLight(0xfff1e2, 0);
+  portraitKey.layers.set(PORTRAIT_LAYER);
+  scene.add(portraitKey);
+  scene.add(portraitKey.target);
+  const portraitFill = new THREE.HemisphereLight(0xd8e6ff, 0x40202c, 0);
+  portraitFill.layers.set(PORTRAIT_LAYER);
+  scene.add(portraitFill);
+  let portraitSubject = null;
+  let portraitRect = null;      // { x, y, w, h } in CSS pixels, top-left origin
+  const _pSubject = new THREE.Vector3();
+  const _pOffset = new THREE.Vector3();
+  const _keepClear = new THREE.Color();
+
+  /**
+   * @param {THREE.Object3D|null} obj the thing to frame
+   * @param {object} [opts] { height } metres above the subject origin to aim at
+   */
+  function setPortraitSubject(obj, opts) {
+    portraitSubject = obj ? { obj, height: (opts && opts.height) || 2.9 } : null;
+  }
+
+  /** @param {object|null} rect { x, y, w, h } in CSS pixels, or null to hide. */
+  function setPortraitRect(rect) {
+    portraitRect = rect && rect.w > 0 && rect.h > 0 ? rect : null;
+  }
+
+  function renderPortrait() {
+    if (!portraitRect || !portraitSubject || !portraitSubject.obj) return;
+    const s = portraitSubject.obj;
+    if (!s.parent) return;                       // not in the scene right now
+
+    s.updateWorldMatrix(true, false);
+    _pSubject.setFromMatrixPosition(s.matrixWorld);
+    const rig = s.parent;
+    const scl = rig.scale ? rig.scale.y : 1;
+    const yaw = rig.rotation ? rig.rotation.y : 0;
+    // Its face is on its chest, so aim at chest height and stand in FRONT of
+    // it - the creature faces -Z in its own frame, rotated by its yaw.
+    _pSubject.y += portraitSubject.height * scl;
+    const dist = 3.1 * scl;
+    // Stand three-quarters rather than dead-on, biased toward the side the sun
+    // comes from. Straight in front of its face is straight into its shadow -
+    // the sun is behind the player, so a head-on portrait is backlit and the
+    // whole face reads as a black rectangle with two eyes floating in it.
+    const az = yaw + PORTRAIT_AZIMUTH;
+    _pOffset.set(-Math.sin(az) * dist, 0.30 * scl, -Math.cos(az) * dist);
+    portraitCam.position.copy(_pSubject).add(_pOffset);
+    portraitCam.lookAt(_pSubject);
+
+    // setViewport/setScissor take CSS pixels and apply the pixel ratio
+    // themselves. Passing device pixels here scales the rectangle twice, which
+    // renders the inset at several times its size in the wrong corner and
+    // leaves the main view drawn into a fraction of the canvas.
+    const w = renderer.domElement.width / renderer.getPixelRatio();
+    const h = renderer.domElement.height / renderer.getPixelRatio();
+    const px = Math.round(portraitRect.x);
+    // The rect is authored top-left like the DOM; WebGL's origin is bottom-left.
+    const py = Math.round(h - portraitRect.y - portraitRect.h);
+    const pw = Math.round(portraitRect.w);
+    const ph = Math.round(portraitRect.h);
+    if (pw < 2 || ph < 2 || px + pw < 0 || py + ph < 0) return;
+
+    portraitCam.aspect = pw / ph;
+    portraitCam.updateProjectionMatrix();
+
+    // Three things have to be borrowed and put back, or the pass leaks into the
+    // next frame: fog would grey the portrait out exactly when it matters, the
+    // scene background would repaint the sky over the whole inset, and
+    // autoClear plus the clear colour would follow us into the main render.
+    const keepFog = scene.fog;
+    const keepBg = scene.background;
+    const keepAuto = renderer.autoClear;
+    // Do NOT rebuild the shadow map for this pass. renderer.render() refreshes
+    // it on every call, and a second full 1024x1024 shadow render for a 100px
+    // inset is by far the most expensive thing about the portrait - it cost
+    // nearly half the frame rate. The map the main pass just built is still
+    // valid; the portrait only needs to sample it.
+    const keepShadowAuto = renderer.shadowMap.autoUpdate;
+    renderer.shadowMap.autoUpdate = false;
+    // Light it from where the portrait camera stands, so the face it is looking
+    // at is the face that is lit. Slightly above and to one side of the lens,
+    // which is where a key light goes.
+    portraitKey.position.copy(portraitCam.position);
+    portraitKey.position.y += 1.4 * scl;
+    portraitKey.target.position.copy(_pSubject);
+    portraitKey.target.updateMatrixWorld();
+    portraitKey.intensity = PORTRAIT_KEY;
+    portraitFill.intensity = PORTRAIT_FILL;
+    renderer.getClearColor(_keepClear);
+    const keepAlpha = renderer.getClearAlpha();
+
+    scene.fog = null;
+    scene.background = null;
+    renderer.autoClear = false;
+
+    renderer.setScissorTest(true);
+    renderer.setViewport(px, py, pw, ph);
+    renderer.setScissor(px, py, pw, ph);
+    renderer.setClearColor(portraitBg, 1);
+    renderer.clear(true, true, false);
+    renderer.render(scene, portraitCam);
+    renderer.setScissorTest(false);
+
+    renderer.setViewport(0, 0, w, h);
+    renderer.setScissor(0, 0, w, h);
+    renderer.setClearColor(_keepClear, keepAlpha);
+    renderer.autoClear = keepAuto;
+    renderer.shadowMap.autoUpdate = keepShadowAuto;
+    portraitKey.intensity = 0;
+    portraitFill.intensity = 0;
+    scene.fog = keepFog;
+    scene.background = keepBg;
+  }
+
   function render() {
     renderer.render(scene, camera);
+    renderPortrait();
   }
 
   // --------------------------------------------------------------- reset
@@ -457,5 +607,8 @@ export function createRenderer(canvasEl) {
   resize();
   watchViewport();
 
-  return { renderer, scene, camera, sun, hemi, resize, render, reset, update, setDread };
+  return {
+    renderer, scene, camera, sun, hemi, resize, render, reset, update, setDread,
+    setPortraitSubject, setPortraitRect, PORTRAIT_LAYER,
+  };
 }

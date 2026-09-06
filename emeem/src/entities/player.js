@@ -202,7 +202,12 @@ export function createPlayer(ctx) {
     const p = state.player;
     p.grabPoint.set(
       p.pos.x + FWD_Z * Math.sin(yaw) * GRAB_FORWARD,
-      p.pos.y + CONFIG.emeem.hoverY,
+      // Rise with the reach. The hand lifts its whole body into the pincer, so
+      // a grab point pinned at emeem.hoverY sits ~0.6m BELOW the tips that are
+      // closing: every emeem was magneted to a point under the palm and then
+      // crushed out of existence there rather than in the claw.
+      p.pos.y + CONFIG.emeem.hoverY +
+        (CONFIG.player.pinchHeight - CONFIG.emeem.hoverY) * p.reach,
       p.pos.z + FWD_Z * Math.cos(yaw) * GRAB_FORWARD,
     );
   }
@@ -576,7 +581,12 @@ export function createPlayer(ctx) {
     if (handHasPinch) hand.setPinch(Math.max(CLAW_NEUTRAL * (1 - p.reach), p.pinch));
 
     if (handHasUpdate) {
-      handOpts.speed = speed;
+      // Zero the gait once the run is over. main.js stops calling fixedUpdate
+      // when the phase leaves 'playing', so state.player.vel stays frozen at
+      // whatever it was - 7.2 m/s for a running death - and the hand sprinted
+      // on the spot under the game-over card while the Protector standing over
+      // it correctly settled into an idle.
+      handOpts.speed = state.phase === 'playing' ? speed : 0;
       handOpts.grounded = p.grounded;
       handOpts.dread = state.dread;
       handOpts.time = clock;

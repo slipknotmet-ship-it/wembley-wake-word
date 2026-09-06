@@ -267,6 +267,19 @@ export function createMonster(ctx) {
   const group = new THREE.Group();
   group.name = 'monster';
   group.add(face.group);
+
+  // Opt every part of the creature into the portrait layer, IN ADDITION to
+  // layer 0 rather than instead of it: the main camera still draws it normally,
+  // and the portrait camera - which sees only this layer - skips the entire
+  // rest of the world for free. Lights stay on layer 0 and still light it,
+  // because three.js tests the light's layers against the OBJECT's, and the
+  // object is on both.
+  const PORTRAIT_LAYER = (ctx.engine && ctx.engine.PORTRAIT_LAYER) || 1;
+  face.group.traverse((o) => o.layers.enable(PORTRAIT_LAYER));
+  if (ctx.engine && ctx.engine.setPortraitSubject) {
+    // Aim at the sunglasses, which sit at chest height and ARE its eyes.
+    ctx.engine.setPortraitSubject(face.group, { height: 2.55 });
+  }
   // main.js never adds entity groups itself. ctx.scene is live at construction
   // time; ctx.world and ctx.audio are NOT, so nothing below may touch them
   // outside update()/fixedUpdate()/reset().
