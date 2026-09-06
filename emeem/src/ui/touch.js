@@ -358,6 +358,13 @@ export function createTouchControls(uiRootEl, ctx) {
     // events still bubble to window, where the move/up handlers live.
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* unsupported */ }
     if (zonesDirty) measure();
+    // A fresh down for an id we still believe is held means its up never
+    // arrived (released outside the window, event swallowed by the browser, a
+    // mouse whose pointerId is reused for every click). Drop the old hold or
+    // that button stays down for the rest of the run - the exact stuck-arrow
+    // failure everything else in this file guards against.
+    const stale = pointers.get(e.pointerId);
+    if (stale) release(stale, 'p' + e.pointerId);
     pointers.set(e.pointerId, act);
     press(act, 'p' + e.pointerId);
   }
@@ -518,8 +525,11 @@ export function createTouchControls(uiRootEl, ctx) {
   return {
     destroy() {
       if (destroyed) return;
-      destroyed = true;
+      // Release BEFORE raising the flag: apply() no-ops once `destroyed` is
+      // set, so flipping it first would leave a held arrow frozen into
+      // state.input with nothing left alive to ever clear it.
       releaseAll();
+      destroyed = true;
       for (const fn of cleanups) { try { fn(); } catch { /* already gone */ } }
       cleanups.length = 0;
       if (layer && layer.parentNode) layer.parentNode.removeChild(layer);
