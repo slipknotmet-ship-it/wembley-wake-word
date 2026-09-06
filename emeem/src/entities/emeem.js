@@ -511,10 +511,21 @@ export function createEmeems(ctx) {
           continue;
         }
         const p = 1 - e.pop / POP_TIME;
-        e.mesh.scale.setScalar((1 + 1.9 * p) * (1 - p * p));
-        e.mesh.position.y += dt * 1.6;
+        // A small flare, then crushed out of existence - NOT a bloom-and-float.
+        // The emeem was just pinched; it should die in the claw.
+        e.mesh.scale.setScalar((1 + 0.5 * p) * (1 - p * p));
+        // Ride the pincer while it is being crushed, so the catch reads as the
+        // hand taking it rather than the emeem escaping upward.
+        if (s.player.grabPoint) {
+          const kk = 1 - Math.exp(-20 * dt);
+          e.mesh.position.x += (s.player.grabPoint.x - e.mesh.position.x) * kk;
+          e.mesh.position.y += (s.player.grabPoint.y - e.mesh.position.y) * kk;
+          e.mesh.position.z += (s.player.grabPoint.z - e.mesh.position.z) * kk;
+        } else {
+          e.mesh.position.y += dt * 1.6;
+        }
         e.mesh.quaternion.setFromAxisAngle(AXIS_Y, t * E.spinSpeed * 4 + e.phase).multiply(TILT_Q);
-        e.glow.position.y = e.mesh.position.y;
+        e.glow.position.copy(e.mesh.position);
         e.glow.scale.setScalar(GLOW_SCALE * (1 + 1.6 * p) * (1 - p * p * p));
         continue;
       }
@@ -540,16 +551,23 @@ export function createEmeems(ctx) {
 
       if (reachable && d2 < MAGNET_R2) {
         const d = Math.sqrt(d2);
+        // Pull toward the PINCER, not the player origin: an emeem drawn to the
+        // body centre ends up hovering over the palm, which looks like it is
+        // being absorbed rather than picked up. The pickup test below still uses
+        // distance to the player, so this changes only what the eye sees.
+        const gx = s.player.grabPoint ? s.player.grabPoint.x : px;
+        const gz = s.player.grabPoint ? s.player.grabPoint.z : pz;
+        const gy = s.player.grabPoint ? s.player.grabPoint.y : py + E.hoverY;
         // Ease strengthens toward the centre so the pull snaps rather than
         // creeping. exp() form is frame-rate independent: same feel at 60 and
         // 120fps, which matters because this phone can run either.
         const ease = 1 - d / MAGNET_R;
         const k = 1 - Math.exp(-E.magnetStrength * ease * dt);
-        bp.x += dx * k;
-        bp.z += dz * k;
-        // Rise to the hand's grab height, so a mid-jump catch flies up into the
+        bp.x += (gx - bp.x) * k;
+        bp.z += (gz - bp.z) * k;
+        // Rise to the pincer's height, so a mid-jump catch flies up into the
         // pinch instead of clipping through the wrist.
-        bp.y += ((py + E.hoverY) - bp.y) * k;
+        bp.y += (gy - bp.y) * k;
         dx = px - bp.x;
         dz = pz - bp.z;
         d2 = dx * dx + dz * dz;

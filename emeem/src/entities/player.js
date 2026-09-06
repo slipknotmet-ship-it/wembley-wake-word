@@ -60,9 +60,6 @@ const YAW_MIN_SPEED = 0.4;
  */
 const HAND_FACES_NEG_Z = true;
 
-/** Pinch relaxes back open at this exponential rate (1 -> ~0.05 in 0.37s). */
-const PINCH_DECAY = 8;
-
 /**
  * Resting closure of the claw while nothing is within reach. Not fully open:
  * a hand that runs around with its fingers splayed all game has nowhere to go
@@ -94,6 +91,20 @@ const REACH_YAW_MAX = 0.30;
  */
 const REACH_FULL_AT = 2.2;
 
+/**
+ * Metres in front of the hand's origin that the pincer sits. Shortened along
+ * with the thumb: a real thumb only reaches about half a palm-length past the
+ * knuckles, so the meeting point of the two tips moved back with it.
+ */
+const GRAB_FORWARD = 0.46;
+
+/**
+ * Sign of the puppet's local forward axis on Z, derived from HAND_FACES_NEG_Z so
+ * flipping that one flag really does move everything - including the grab point
+ * emeem.js magnets toward, which would otherwise stay pinned behind the hand.
+ */
+const FWD_Z = HAND_FACES_NEG_Z ? -1 : 1;
+
 /** Landings harder than this shake the camera. A jump apex lands at 8.4 m/s. */
 const LAND_SHAKE_SPEED = 12;
 
@@ -107,7 +118,6 @@ const _stepMax = new THREE.Vector3();
 const _hits = [];
 const _stepHits = [];
 
-/** Wraps an angle into -PI..PI so turning always takes the shortest path. */
 /** Clamp to 0..1. */
 function clamp01(v) {
   return v < 0 ? 0 : v > 1 ? 1 : v;
@@ -123,6 +133,7 @@ function dampTo(current, target, rate, dt) {
   return current + (target - current) * (1 - Math.exp(-rate * dt));
 }
 
+/** Wraps an angle into -PI..PI so turning always takes the shortest path. */
 function wrapPi(a) {
   let x = (a + Math.PI) % TAU;
   if (x < 0) x += TAU;
@@ -166,6 +177,9 @@ export function createPlayer(ctx) {
   // Seconds left of the post-catch clamp. While this is running the claw is
   // driven shut; when it expires the claw relaxes back toward neutral.
   let grabHold = 0;
+  // Current reach glance, radians, held separately from p.yaw so it stays a
+  // bounded offset on the facing rather than accumulating into it.
+  let glance = 0;
 
   // Working copies for the collision helpers, so they can mutate position and
   // velocity without out-params or per-step object churn.
@@ -177,6 +191,21 @@ export function createPlayer(ctx) {
   let wvz = 0;
   let wGrounded = false;
   let wSupport = 0;
+
+  /**
+   * Publishes where the pincer is, for emeem.js to magnet toward. The puppet's
+   * local forward is FWD_Z on its own Z, and rotating (0, 0, FWD_Z) by `yaw`
+   * about Y gives (FWD_Z * sin, 0, FWD_Z * cos).
+   * @param {number} yaw the facing actually being rendered this frame
+   */
+  function writeGrabPoint(yaw) {
+    const p = state.player;
+    p.grabPoint.set(
+      p.pos.x + FWD_Z * Math.sin(yaw) * GRAB_FORWARD,
+      p.pos.y + CONFIG.emeem.hoverY,
+      p.pos.z + FWD_Z * Math.cos(yaw) * GRAB_FORWARD,
+    );
+  }
 
   // ------------------------------------------------------------- collision
 
@@ -504,20 +533,36 @@ export function createPlayer(ctx) {
 
     // Glance toward the emeem being reached for, so the claw arrives pointing
     // at it rather than catching it out of the side of the hand.
+    //
+    // This is a DISPLAY offset layered on top of p.yaw, never folded back into
+    // it. Writing it into p.yaw made the offset compound every frame: the cap
+    // then limited the per-frame STEP rather than the pose, and the equilibrium
+    // between it and the turnLerp damping moved with the frame rate. Measured
+    // against an emeem held 90 degrees off the travel line, the hand swung 46 /
+    // 72 / 79 degrees at 30 / 60 / 120 fps - i.e. it stopped facing where it was
+    // running and turned to face the emeem, which is exactly what REACH_YAW_MAX
+    // exists to prevent. Held as an offset the cap means what it says.
+    let glanceTarget = 0;
     if (p.reach > 0.01 && p.hasNearestEmeem) {
-      const dx = p.nearestEmeem.x - p.pos.x;
-      const dz = p.nearestEmeem.z - p.pos.z;
-      if (dx * dx + dz * dz > 1e-4) {
-        const toEmeem = HAND_FACES_NEG_Z ? Math.atan2(-dx, -dz) : Math.atan2(dx, dz);
-        let glance = wrapPi(toEmeem - p.yaw) * REACH_YAW_BIAS * p.reach;
-        if (glance > REACH_YAW_MAX) glance = REACH_YAW_MAX;
-        else if (glance < -REACH_YAW_MAX) glance = -REACH_YAW_MAX;
-        p.yaw = wrapPi(p.yaw + glance);
+      const gdx = p.nearestEmeem.x - p.pos.x;
+      const gdz = p.nearestEmeem.z - p.pos.z;
+      if (gdx * gdx + gdz * gdz > 1e-4) {
+        const toEmeem = HAND_FACES_NEG_Z ? Math.atan2(-gdx, -gdz) : Math.atan2(gdx, gdz);
+        glanceTarget = wrapPi(toEmeem - p.yaw) * REACH_YAW_BIAS * p.reach;
+        if (glanceTarget > REACH_YAW_MAX) glanceTarget = REACH_YAW_MAX;
+        else if (glanceTarget < -REACH_YAW_MAX) glanceTarget = -REACH_YAW_MAX;
       }
     }
+    // Damped so the glance eases back out instead of snapping the hand straight
+    // the instant the emeem is taken and hasNearestEmeem drops to false.
+    glance = dampTo(glance, glanceTarget, P.turnLerp, step);
+    if (glance < 1e-4 && glance > -1e-4) glance = 0;
+    const faceYaw = wrapPi(p.yaw + glance);
+
+    writeGrabPoint(faceYaw);
 
     group.position.copy(p.pos);
-    group.rotation.y = p.yaw;
+    group.rotation.y = faceYaw;
 
     // Neutral relaxes toward wide open as the reach builds; the grab overrides
     // it outright, so a catch always closes no matter where the reach was.
@@ -547,7 +592,11 @@ export function createPlayer(ctx) {
     p.grounded = false;
     p.groundY = gy;
     p.pinch = 0;
+    p.reach = 0;
     p.distanceRun = 0;
+    // emeem.js reads grabPoint before player.update() runs on the first frame of
+    // a run, so seed it here rather than leaving last run's value in place.
+    writeGrabPoint(0);
 
     state.input.jumpPressed = false;
 
@@ -559,6 +608,7 @@ export function createPlayer(ctx) {
     prevGrounded = false;
 
     grabHold = 0;
+    glance = 0;
     if (handHasReach) hand.setReach(0);
     group.position.copy(p.pos);
     group.rotation.set(0, 0, 0);

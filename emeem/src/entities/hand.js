@@ -49,6 +49,7 @@ const _invRig = new THREE.Matrix4();
 const _qA = new THREE.Quaternion();
 const _qB = new THREE.Quaternion();
 const _qC = new THREE.Quaternion();
+const _qD = new THREE.Quaternion();
 const AXIS_X = new THREE.Vector3(1, 0, 0);
 const AXIS_Y = new THREE.Vector3(0, 1, 0);
 const AXIS_Z = new THREE.Vector3(0, 0, 1);
@@ -104,6 +105,7 @@ const CLAW_SWING = 0.045;   // claw reach oscillation over the stride
 const IDLE_BOB = 0.012;     // slow claw breathing when standing still
 const REACH_LERP = 9.0;     // how fast the body drops into the reaching pose
 const REACH_PITCH = -0.15;  // radians of extra nose-down dip at full reach
+const FIST_CROUCH = 0.10;   // metres the body settles as the fist closes
 
 /** How fast the airborne pose blends in/out (per second). */
 const AIR_LERP = 13.0;
@@ -205,13 +207,13 @@ function mergeParts(T, parts) {
  * one of those two, and a singular frame makes the knee flip 180 degrees mid
  * stride - the classic procedural-walk twitch.
  *
- *   MODE_FORWARD:  R = Ry(a) * Rx(b)              (degenerate straight up/down)
+ *   MODE_FORWARD:  R = Ry(a) * Rx(b) * Ry(roll) * Rx(bend)   (degenerate up/down)
  *   MODE_DOWN:     R = Ry(planeYaw) * Rz(c) * Rx(b)  (degenerate horizontal)
  *
  * Both put the bend axis on the root's local X, which is why the knee angle can
  * simply be folded into `b`: Rx(b) * Rx(a1) === Rx(b + a1).
  */
-function solveTwoBone(rootObj, kneeObj, hip, target, l1, l2, bendSign, mode, planeYaw) {
+function solveTwoBone(rootObj, kneeObj, hip, target, l1, l2, bendSign, mode, planeYaw, bendRoll) {
   _dir.copy(target).sub(hip);
   let d = _dir.length();
   if (d < 1e-5) {
@@ -233,8 +235,21 @@ function solveTwoBone(rootObj, kneeObj, hip, target, l1, l2, bendSign, mode, pla
     const b = Math.acos(clamp(-_dir.y, -1, 1));
     const a = Math.atan2(-_dir.x, -_dir.z);
     _qA.setFromAxisAngle(AXIS_Y, a);
-    _qC.setFromAxisAngle(AXIS_X, b + bendSign * a1);
-    rootObj.quaternion.copy(_qA).multiply(_qC);
+    if (bendRoll) {
+      // Ry(a)*Rx(b) aims the straight chain down its local -Y; rolling about
+      // that same local Y therefore turns the plane the knuckle bulges into
+      // WITHOUT disturbing the aim. This is what separates a thumb from a
+      // finger: a finger's knuckle rises in the vertical plane of its reach, a
+      // thumb's swings out sideways across the palm. With roll = 0 this reduces
+      // exactly to Rx(b + bendSign*a1), so fingers are unaffected.
+      _qB.setFromAxisAngle(AXIS_X, b);
+      _qD.setFromAxisAngle(AXIS_Y, bendRoll);
+      _qC.setFromAxisAngle(AXIS_X, bendSign * a1);
+      rootObj.quaternion.copy(_qA).multiply(_qB).multiply(_qD).multiply(_qC);
+    } else {
+      _qC.setFromAxisAngle(AXIS_X, b + bendSign * a1);
+      rootObj.quaternion.copy(_qA).multiply(_qC);
+    }
   } else {
     // Express the aim direction in the limb's own (yawed) bend plane first.
     const cy = Math.cos(planeYaw);
@@ -305,8 +320,10 @@ export function createHand(threeArg, configArg) {
 
   // One canonical bone pair, derived from the stance height so the legs always
   // reach the floor with a comfortable ~70% extension at rest.
-  const BONE_L1 = HIP_MID * 0.77;
-  const BONE_L2 = HIP_MID * 0.69;
+  // Floored: the IK divides by l1 and by l1*l2, so a config that drove HIP_MID
+  // to zero would hand every joint a NaN quaternion and freeze the pose solid.
+  const BONE_L1 = Math.max(0.02, HIP_MID * 0.77);
+  const BONE_L2 = Math.max(0.02, HIP_MID * 0.69);
   const R_PROX = 0.078 * U;
   const R_DIST = 0.062 * U;
 
@@ -370,6 +387,12 @@ export function createHand(threeArg, configArg) {
 
   const skinParts = [
     palmGeo.clone().translate(0, STAND_Y, 0),
+    // Thenar eminence: the fleshy mound at the base of the thumb. Anatomically
+    // it is most of what distinguishes a hand's silhouette from a paw, and
+    // without it the thumb looks stuck onto the side of the palm.
+    new T.SphereGeometry(0.20 * U, 12, 9)
+      .scale(0.85, 0.62, 1.15)
+      .translate(-0.26 * U, STAND_Y - 0.03 * U, -0.02 * U),
     new T.CapsuleGeometry(WRIST_R, Math.max(0.01, WRIST_LEN - 2 * WRIST_R), 5, 12)
       .rotateX(WRIST_TILT)
       .translate(0, wristMidY, wristMidZ),
@@ -392,19 +415,27 @@ export function createHand(threeArg, configArg) {
   const fingerSpecs = [
     {
       id: 'thumb',
-      hip: new T.Vector3(-0.36 * U, STAND_Y - 0.10 * U, -0.22 * U),
-      scale: 0.95, thick: 1.32, darkTip: false,
-      // The thumb sits under the index, so its knuckle bulges DOWN (-1) and the
-      // tip curls up into the pinch.
-      bendSign: -1, mode: MODE_FORWARD, planeYaw: 0,
-      openTip: new T.Vector3(-0.56 * U, STAND_Y - 0.14 * U, -0.66 * U),
-      closedTip: new T.Vector3(-0.35 * U, STAND_Y - 0.13 * U, -0.80 * U),
-      airTip: new T.Vector3(-0.64 * U, STAND_Y - 0.20 * U, -0.62 * U),
+      // A thumb is not a short finger in the finger row. It attaches low and
+      // BACK, near the wrist, off the side of the palm.
+      hip: new T.Vector3(-0.34 * U, STAND_Y - 0.05 * U, -0.02 * U),
+      // Two phalanges against a finger's three: much shorter, much stubbier.
+      scale: 0.72, thick: 1.62, darkTip: false,
+      // Opposed: the knuckle swings out ACROSS the palm rather than bulging in
+      // the vertical plane of its reach, which is what made it read as an
+      // upside-down index finger.
+      bendSign: -1, mode: MODE_FORWARD, planeYaw: 0, bendRoll: 1.15,
+      openTip: new T.Vector3(-0.58 * U, 0.30 * U, -0.26 * U),
+      closedTip: new T.Vector3(-0.40 * U, STAND_Y - 0.08 * U, -0.44 * U),
+      airTip: new T.Vector3(-0.64 * U, 0.42 * U, -0.20 * U),
       // Reaching down for an emeem: the thumb drops below the index and sits
       // back from it, so the open gap is the diagonal pincer of a real pinch
       // rather than two fingers side by side.
+      // Pinched, the thumb pad stops 0.10 m ABOVE the index pad - the same gap
+      // the running pose closes to, so the two tip balls press together instead
+      // of occupying the same point. Sharing one target between both fingers
+      // made them interpenetrate completely at every catch (reach ~1, pinch ~1).
       reachOpenTip: new T.Vector3(-0.52 * U, 0.46 * U, -0.62 * U),
-      reachShutTip: new T.Vector3(-0.40 * U, 0.34 * U, -0.74 * U),
+      reachShutTip: new T.Vector3(-0.40 * U, 0.39 * U, -0.74 * U),
       swayPhase: 0.0,
     },
     {
@@ -413,15 +444,20 @@ export function createHand(threeArg, configArg) {
       scale: 1.05, thick: 1.05, darkTip: false,
       // Top half of the claw: knuckle up (+1), tip curls down to meet the thumb.
       bendSign: 1, mode: MODE_FORWARD, planeYaw: 0,
-      // Held high enough that the open claw silhouettes against the ground
-      // rather than lying in it, seen from the chase camera's shallow stoop.
-      openTip: new T.Vector3(-0.28 * U, STAND_Y + 0.20 * U, -1.00 * U),
-      closedTip: new T.Vector3(-0.35 * U, STAND_Y - 0.03 * U, -0.80 * U),
-      airTip: new T.Vector3(-0.24 * U, STAND_Y + 0.32 * U, -1.02 * U),
+      // Rests DOWN with the other fingers: when a hand walks on its fingers the
+      // index is one of them, not an antenna held in the air. It only lifts to
+      // meet the thumb when there is something to pinch, which is what the
+      // reach targets below are for.
+      openTip: new T.Vector3(-0.30 * U, 0.17 * U, -0.60 * U),
+      closedTip: new T.Vector3(-0.40 * U, STAND_Y - 0.08 * U, -0.44 * U),
+      airTip: new T.Vector3(-0.26 * U, 0.44 * U, -0.74 * U),
       // The index hangs furthest down and forward - it is the long half of the
       // pincer, and it is what closes up onto the thumb.
+      // The index holds its height and pulls back; the thumb is what travels
+      // down onto it. Kept 0.10 m below the thumb's shut target so neither tip
+      // has to cross through the other on the way in.
       reachOpenTip: new T.Vector3(-0.30 * U, 0.30 * U, -0.86 * U),
-      reachShutTip: new T.Vector3(-0.40 * U, 0.34 * U, -0.74 * U),
+      reachShutTip: new T.Vector3(-0.40 * U, 0.29 * U, -0.74 * U),
       swayPhase: 1.1,
     },
     {
@@ -431,6 +467,10 @@ export function createHand(threeArg, configArg) {
       bendSign: 1, mode: MODE_DOWN, planeYaw: 0.0,
       home: new T.Vector3(-0.14 * U, 0, -0.38 * U),
       tuck: new T.Vector3(-0.04 * U, -0.30 * U, 0.16 * U),
+      // Curled tight under the palm for the grab. Pulled in close so the two
+      // bones fold hard and the KNUCKLE juts down - the fist rests on its
+      // knuckles the way a hand does when it braces to pick something up.
+      fist: new T.Vector3(-0.06 * U, -0.20 * U, 0.20 * U),
     },
     {
       id: 'ring',
@@ -439,6 +479,7 @@ export function createHand(threeArg, configArg) {
       bendSign: 1, mode: MODE_DOWN, planeYaw: -0.22,
       home: new T.Vector3(0.20 * U, 0, -0.28 * U),
       tuck: new T.Vector3(0.06 * U, -0.28 * U, 0.16 * U),
+      fist: new T.Vector3(0.08 * U, -0.19 * U, 0.20 * U),
     },
     {
       id: 'pinky',
@@ -447,6 +488,7 @@ export function createHand(threeArg, configArg) {
       bendSign: 1, mode: MODE_DOWN, planeYaw: -0.45,
       home: new T.Vector3(0.44 * U, 0, -0.06 * U),
       tuck: new T.Vector3(0.12 * U, -0.26 * U, 0.14 * U),
+      fist: new T.Vector3(0.16 * U, -0.18 * U, 0.18 * U),
     },
   ];
 
@@ -495,6 +537,7 @@ export function createHand(threeArg, configArg) {
     if (spec.mode === MODE_DOWN) {
       entry.home = spec.home;
       entry.tuck = spec.tuck;
+      entry.fist = spec.fist;
       entry.strideScale = spec.scale;   // a short finger takes a short step
       entry.phase = LEG_PHASE_OFFSET[legs.length] || 0;
       legs.push(entry);
@@ -506,6 +549,7 @@ export function createHand(threeArg, configArg) {
     } else {
       entry.openTip = spec.openTip;
       entry.closedTip = spec.closedTip;
+      entry.bendRoll = spec.bendRoll || 0;
       entry.reachOpenTip = spec.reachOpenTip;
       entry.reachShutTip = spec.reachShutTip;
       entry.airTip = spec.airTip;
@@ -602,6 +646,11 @@ export function createHand(threeArg, configArg) {
     const inv = 1 - pinch;
     const pinchShaped = 1 - inv * inv;
 
+    // How balled-up the three walking fingers are. Driven by the raw pinch and
+    // squared, so they stay planted through the whole approach and only clench
+    // in the last moment as the claw actually shuts.
+    const fistAmt = pinch * pinch;
+
     // ------------------------------------------------------------- gait ---
     const speedF = clamp01(speed / (C.player.walkSpeed || 1));
     // `moving` gates every gait amplitude: standing still means planted feet,
@@ -647,7 +696,9 @@ export function createHand(threeArg, configArg) {
     _pivot.set(0, STAND_Y, 0).applyQuaternion(rig.quaternion);
     rig.position.set(
       -_pivot.x + noise(nt, 0) * trPos,
-      STAND_Y - _pivot.y + bob + noise(nt, 1) * trPos,
+      // Drop onto the knuckles as the fist forms: a hand braced to pinch sits
+      // lower than one standing on extended fingers.
+      STAND_Y - _pivot.y + bob - FIST_CROUCH * U * pinch * pinch + noise(nt, 1) * trPos,
       // A little forward shift over the feet at speed; the lean alone reads as
       // tipping over rather than as driving forward.
       -_pivot.z - LUNGE * U * speedF * (1 - air) + noise(nt, 2) * trPos * 0.7,
@@ -675,6 +726,14 @@ export function createHand(threeArg, configArg) {
         leg.home.z - c * stride,
       );
       _foot.applyMatrix4(_invRig);
+
+      // Grab: the three walking fingers clench into a fist and the hand braces
+      // on its knuckles while the thumb and index do the pinching. Blended on
+      // the IK *target* like the air tuck, so it never fights the solver.
+      if (fistAmt > 0 && leg.fist) {
+        _tuck.copy(leg.hip).add(leg.fist);
+        _foot.lerp(_tuck, fistAmt);
+      }
 
       if (air > 0) {
         // Airborne: fold the legs up under the palm. Blending the *target*
@@ -717,7 +776,7 @@ export function createHand(threeArg, configArg) {
                 Math.sin(time * 1.7 + f.swayPhase);
 
       solveTwoBone(f.root, f.knee, f.hip, _tip, f.l1, f.l2,
-        f.bendSign, MODE_FORWARD, 0);
+        f.bendSign, MODE_FORWARD, 0, f.bendRoll);
     }
   }
 

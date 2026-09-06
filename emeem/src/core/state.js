@@ -30,6 +30,13 @@ export const state = {
      * because it is already iterating the pool for the pickup test, so this
      * costs nothing extra.
      */
+    /**
+     * World position of the pincer itself - roughly where the thumb and index
+     * tips meet, in front of the hand. entities/emeem.js magnets toward THIS
+     * rather than the player origin, so an emeem flies into the claw instead of
+     * to the middle of the palm. Written by entities/player.js every frame.
+     */
+    grabPoint: new THREE.Vector3(),
     nearestEmeem: new THREE.Vector3(),
     nearestEmeemDist: Infinity,
     hasNearestEmeem: false,
@@ -78,6 +85,7 @@ export function resetState() {
   state.player.groundY = 0;
   state.player.pinch = 0;
   state.player.reach = 0;
+  state.player.grabPoint.set(0, 0, 0);
   state.player.nearestEmeem.set(0, 0, 0);
   state.player.nearestEmeemDist = Infinity;
   state.player.hasNearestEmeem = false;

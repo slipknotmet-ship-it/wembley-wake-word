@@ -95,6 +95,18 @@ function range(rng, a, b) {
   return a + (b - a) * rng();
 }
 
+/**
+ * True only for a usable streaming centre. A non-finite player coordinate is
+ * unrecoverable here: Math.floor(NaN) keys a chunk by NaN, every NaN comparison
+ * in the unload test is false so that chunk can never be evicted, and its NaN
+ * colliders sit in the shared list poisoning every queryAABB for the rest of
+ * the run. Cheaper to refuse the coordinate at the door and keep streaming
+ * around the last good one.
+ */
+function usableCoord(v) {
+  return typeof v === 'number' && Number.isFinite(v);
+}
+
 // ------------------------------------------------------------ base geometry
 
 /**
@@ -204,10 +216,15 @@ export function createWorld(ctx) {
   applyGridShader(groundMaterial, CS / 8, CS);
 
   // ----------------------------------------------------------------- ground
-  // A single plane that follows the player, snapped to whole chunks. It is
-  // wide enough to reach past fogFar in every direction, so the player never
-  // sees an edge and we never pay for per-chunk ground meshes.
-  const GROUND_SIZE = (VIEW * 2 + 5) * CS;
+  // A single plane that follows the player, snapped to whole chunks, instead of
+  // per-chunk ground meshes. Half of it must still clear fogFar after
+  // followGround() snaps it, which can leave the player up to CS/2 off centre.
+  // Deriving the floor from fogFar means raising the fog distance widens the
+  // plane instead of silently hanging its edge where the player can see it.
+  const GROUND_SIZE = Math.max(
+    (VIEW * 2 + 5) * CS,
+    Math.ceil(((W.fogFar + CS) * 2) / CS) * CS,
+  );
   const groundGeometry = new THREE.PlaneGeometry(GROUND_SIZE, GROUND_SIZE, 1, 1);
   groundGeometry.rotateX(-Math.PI / 2);
   const groundMesh = new THREE.Mesh(groundGeometry, groundMaterial);
@@ -244,6 +261,23 @@ export function createWorld(ctx) {
   let lastDread = -1;
   let lastGroundX = NaN;
   let lastGroundZ = NaN;
+
+  // The streaming centre. Follows the player, but only ever through
+  // recentre(), so one bad frame of physics cannot wedge the world.
+  let centreX = 0;
+  let centreZ = 0;
+
+  /**
+   * Moves the streaming centre to a position, ignoring unusable coordinates.
+   * The range limit is the one the packed chunk key can address without two
+   * chunks aliasing onto the same Map entry - ~524km, or 20 hours of running.
+   */
+  const CENTRE_LIMIT = (KEY_OFFSET - 2) * CS;
+  function recentre(pos) {
+    if (!pos) return;
+    if (usableCoord(pos.x) && Math.abs(pos.x) < CENTRE_LIMIT) centreX = pos.x;
+    if (usableCoord(pos.z) && Math.abs(pos.z) < CENTRE_LIMIT) centreZ = pos.z;
+  }
 
   // ------------------------------------------------------------ obstacles
 
@@ -563,9 +597,9 @@ export function createWorld(ctx) {
 
   function update(dt, c) {
     const s = (c && c.state) || ctx.state;
-    const pos = s.player.pos;
-    streamAround(pos.x, pos.z, MAX_BUILDS_PER_FRAME, s.levelIndex | 0);
-    followGround(pos.x, pos.z);
+    recentre(s.player && s.player.pos);
+    streamAround(centreX, centreZ, MAX_BUILDS_PER_FRAME, s.levelIndex | 0);
+    followGround(centreX, centreZ);
     applyDread(s.dread);
   }
 
@@ -575,8 +609,9 @@ export function createWorld(ctx) {
     lastGroundX = NaN;
     lastGroundZ = NaN;
     const s = ctx.state;
+    recentre(s.player && s.player.pos);
     applyDread(s.dread);
-    primeAround(s.player.pos.x, s.player.pos.z, s.levelIndex | 0);
+    primeAround(centreX, centreZ, s.levelIndex | 0);
   }
 
   // main.js never adds the world group itself, so we do it here. ctx.scene is
@@ -585,7 +620,8 @@ export function createWorld(ctx) {
   if (ctx.scene) ctx.scene.add(group);
 
   applyDread(ctx.state.dread);
-  primeAround(ctx.state.player.pos.x, ctx.state.player.pos.z, ctx.state.levelIndex | 0);
+  recentre(ctx.state.player && ctx.state.player.pos);
+  primeAround(centreX, centreZ, ctx.state.levelIndex | 0);
 
   return { group, colliders, queryAABB, sampleGroundY, update, reset };
 }
