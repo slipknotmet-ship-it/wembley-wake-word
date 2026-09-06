@@ -42,7 +42,9 @@ async function evalSafe(fn, arg) {
   throw new Error('page kept reloading; re-run once the candidates have settled');
 }
 
-const available = await evalSafe(() => window.__MONSTER__.available);
+let available = await evalSafe(() => window.__MONSTER__.available);
+const only = process.argv.includes('--only') ? process.argv[process.argv.indexOf('--only') + 1] : null;
+if (only) available = available.filter(k => k === only);
 console.log('candidates built:', available.length ? available.join(', ') : '(none)');
 if (!available.length) { await browser.close(); process.exit(1); }
 

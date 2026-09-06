@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { CONFIG as DEFAULT_CONFIG } from '../core/config.js';
 
 /**
@@ -20,8 +21,8 @@ import { CONFIG as DEFAULT_CONFIG } from '../core/config.js';
  *       thickened, corrugator furrows dug between the lenses, brow ridge,
  *       nostrils flared, chest and flanks swollen, traps risen, neck craned.
  *   [1] MAW - the belly fold torn open into a funnel: the aperture splits
- *       vertically, the interior drives 48cm back into the body and the lips
- *       curl 15cm out in front of the calm silhouette.
+ *       vertically, the interior drives 40cm back into the body and the lips
+ *       curl out around it.
  *
  * Both are authored by running ONE parametric sculpt function over three
  * parameter sets (neutral / scowl / maw) and storing the differences. That is
@@ -47,10 +48,9 @@ import { CONFIG as DEFAULT_CONFIG } from '../core/config.js';
  *   5. only then does the skin flush and the lenses take a red glow (additive,
  *      fog-exempt, so it is the last thing to disappear).
  *
- * BUDGET: 23 meshes over 16 geometries and 8 materials, ~4.3k triangles, of
- * which the torso is 2.2k because the torso is the entire performance. Every
- * scratch object is at module scope; update() allocates nothing and only SETS
- * transforms, so a ten minute chase cannot drift the pose by a millimetre.
+ * BUDGET: 22 meshes, ~2.3k triangles, 8 materials. Every scratch object is at
+ * module scope; update() allocates nothing and only SETS transforms, so a long
+ * run cannot drift the pose.
  */
 
 // The module-scope alias lets buildFace default its own THREE argument while
@@ -107,7 +107,7 @@ const KNEE_Y = 0.70;
 const ANKLE_Y = 0.12;
 const SHOULDER_Y = 2.98;
 
-const BROW_Y = 2.885;      // sunglasses centre-line  (the EYES)
+const BROW_Y = 2.92;       // sunglasses centre-line  (the EYES)
 const NAVEL_Y = 2.36;      // navel                   (the NOSE)
 const MOUTH_Y = 2.03;      // belly fold              (the MOUTH)
 
@@ -162,11 +162,14 @@ const U_WARP = 0.62;
  * a relative morph target stores.
  */
 const NEUTRAL = {
-  // mouth - the belly fold
-  mouthY: MOUTH_Y, mouthArc: 0.075, mouthHalfW: 0.460,
-  creaseDepth: 0.042, creaseSig: 0.042,
-  lipUp: 0.014, lipDn: 0.032, lipOff: 0.085, lipSig: 0.075,
-  cornerPull: 0.018, cornerDepth: 0.020, cornerPinch: 0.000,
+  // Mouth - the belly fold. Deepened from the original sculpt: at rest the
+  // frown was so shallow that the calm face read only through the sunglasses,
+  // and the whole point of this creature is that you can see it scowling at
+  // you. It is still placid next to SCOWL; it just has a mouth now.
+  mouthY: MOUTH_Y, mouthArc: 0.132, mouthHalfW: 0.492,
+  creaseDepth: 0.064, creaseSig: 0.044,
+  lipUp: 0.024, lipDn: 0.048, lipOff: 0.090, lipSig: 0.076,
+  cornerPull: 0.046, cornerDepth: 0.034, cornerPinch: 0.018,
   // maw
   mawDepth: 0.000, jawDrop: 0.000, lipFlare: 0.000, mawRx: 0.470, mawRy: 0.210,
   // brow, behind the sunglasses
@@ -647,10 +650,51 @@ export function buildFace(T = THREE_NS, C = DEFAULT_CONFIG) {
   const matFrame = keepMat(new T.MeshStandardMaterial({
     color: 0x14141a, roughness: 0.42, metalness: 0.05,
   }));
+  // Tinted rather than opaque, because there is something behind them worth
+  // seeing: its eyeballs are emeems. Kept dark enough that they read as
+  // sunglasses and the eyes are a thing you notice second.
   const matLens = keepMat(new T.MeshStandardMaterial({
     color: 0x0b0d12, roughness: 0.14, metalness: 0.45,
     emissive: eyeColor.clone(), emissiveIntensity: 0.0,
+    transparent: true, opacity: 0.46, depthWrite: false,
   }));
+
+  // ---------------------------------------------------------- emeem eyes ---
+  /**
+   * Its eyes are emeems: the same domed disc with a raised tip that the player
+   * spends the whole game collecting. The Protector of Emeem Land is wearing
+   * two of them behind its shades.
+   *
+   * Same construction as entities/emeem.js - a squashed sphere with a small
+   * proud tip, two-tone via a baked vertex colour so one material covers both
+   * parts - but authored in the XY plane so layOnChest can seat it on the
+   * chest exactly like the lens.
+   */
+  const EYE_TONES = PAL.emeems || [];
+  // Pale end of the emeem palette deliberately: behind tinted glass a mid or
+  // dark tone reads as a smudge, and the joke only works if you can tell what
+  // they are. Two different tones, because it has odd eyes.
+  const eyeToneL = EYE_TONES[0] ?? 0xf2c4b3;
+  const eyeToneR = EYE_TONES[1] ?? 0xe8a894;
+  const EYE_TIP_SHADE = PAL.emeemTipShade ?? 0.78;
+
+  function paintShade(geo, shade) {
+    const n = geo.attributes.position.count;
+    const arr = new Float32Array(n * 3);
+    arr.fill(shade);
+    geo.setAttribute('color', new T.BufferAttribute(arr, 3));
+    return geo;
+  }
+
+  function makeEyeMat(hex) {
+    return keepMat(new T.MeshStandardMaterial({
+      color: hex, vertexColors: true, roughness: 0.52, metalness: 0.0,
+      // Lit from within just enough to carry through the tint and through fog.
+      emissive: new T.Color(hex), emissiveIntensity: 0.34,
+    }));
+  }
+  const matEyeL = makeEyeMat(eyeToneL);
+  const matEyeR = makeEyeMat(eyeToneR);
   // Additive, fog-exempt: at full dread this is the last thing you can still
   // see of it, two red coals behind the lenses.
   const matGlow = keepMat(new T.MeshBasicMaterial({
@@ -663,7 +707,7 @@ export function buildFace(T = THREE_NS, C = DEFAULT_CONFIG) {
 
   // ================================================================ rig ====
   const group = new T.Group();
-  group.name = 'monsterFace_b';
+  group.name = 'monsterFace';
 
   // rig carries the walk (bob + roll) for the whole animal including the legs.
   const rig = new T.Group();
@@ -816,75 +860,21 @@ export function buildFace(T = THREE_NS, C = DEFAULT_CONFIG) {
   const armR = makeArm(1);
 
   // =========================================================== sunglasses ===
-  /**
-   * Rounded-rect outline sampled WITH its outward normal. Offsetting every
-   * point along its own normal gives an exactly parallel outline, which is what
-   * lets the frame be built as quad strips instead of a triangulated annulus -
-   * and quad strips are what keep every chord short enough to follow the chest.
-   */
-  function roundRectRim(w, h, r, seg) {
-    const hx = Math.max(0, w * 0.5 - r);
-    const hy = Math.max(0, h * 0.5 - r);
-    // four quarter-arcs walked counter-clockwise from the bottom-right corner;
-    // the straight edges fall out as the chords between consecutive arcs
-    const cx = [hx, hx, -hx, -hx];
-    const cy = [-hy, hy, hy, -hy];
-    const a0 = [-Math.PI * 0.5, 0, Math.PI * 0.5, Math.PI];
-    const pts = [];
-    for (let c = 0; c < 4; c++) {
-      for (let t = 0; t <= seg; t++) {
-        const a = a0[c] + (Math.PI * 0.5 * t) / seg;
-        const nx = Math.cos(a);
-        const ny = Math.sin(a);
-        pts.push({ x: cx[c] + r * nx, y: cy[c] + r * ny, nx, ny });
-      }
-    }
-    return pts;
-  }
-
-  /**
-   * The frame: a rounded-rect ring of the given thickness, extruded back into
-   * the chest, plus half a bridge bar reaching in toward the sternum. Built by
-   * hand rather than extruded from a Shape because ExtrudeGeometry triangulates
-   * a ring with long chords across it, and a chord long enough to span the rim
-   * dips further than the frame stands proud - the chest then bites pieces out
-   * of the glasses in three-quarter view.
-   */
-  function buildFrameGeo(side, wIn, hIn, rIn, t, depth, barW, barH) {
-    const rim = roundRectRim(wIn, hIn, rIn, 4);
-    const N = rim.length;
-    const pos = [];
-    const ind = [];
-    const put = (x, y, z) => { pos.push(x, y, z); return pos.length / 3 - 1; };
-    const inF = [], outF = [], inB = [], outB = [];
-    for (let j = 0; j < N; j++) {
-      const q = rim[j];
-      inF.push(put(q.x, q.y, 0));
-      outF.push(put(q.x + q.nx * t, q.y + q.ny * t, 0));
-      inB.push(put(q.x, q.y, depth));
-      outB.push(put(q.x + q.nx * t, q.y + q.ny * t, depth));
-    }
-    for (let j = 0; j < N; j++) {
-      const k = (j + 1) % N;
-      // front face (-Z), outer wall (outward), inner wall (into the aperture)
-      ind.push(inF[j], inF[k], outF[k], inF[j], outF[k], outF[j]);
-      ind.push(outF[j], outF[k], outB[k], outF[j], outB[k], outB[j]);
-      ind.push(inF[j], inB[j], inB[k], inF[j], inB[k], inF[k]);
-    }
-    // half the bridge, reaching from the inner edge of this lens to the midline
-    const bx = -side * (wIn * 0.5 + t + barW * 0.5 - 0.006);
-    const x0 = bx - barW * 0.5, x1 = bx + barW * 0.5;
-    const y0 = -barH * 0.5, y1 = barH * 0.5;
-    const a = put(x0, y0, 0), b = put(x1, y0, 0), c = put(x1, y1, 0), d = put(x0, y1, 0);
-    const ab = put(x0, y0, depth), bb = put(x1, y0, depth);
-    const cb = put(x1, y1, depth), db = put(x0, y1, depth);
-    ind.push(a, c, b, a, d, c);          // front
-    ind.push(d, cb, c, d, db, cb);       // top edge
-    ind.push(a, b, bb, a, bb, ab);       // bottom edge
-    const g = new T.BufferGeometry();
-    g.setIndex(new T.BufferAttribute(new Uint16Array(ind), 1));
-    g.setAttribute('position', new T.BufferAttribute(new Float32Array(pos), 3));
-    return g;
+  /** Rounded rectangle written into an existing Shape or Path. */
+  function roundRect(path, w, h, r) {
+    const hx = w * 0.5;
+    const hy = h * 0.5;
+    const rr = Math.min(r, hx, hy);
+    path.moveTo(-hx + rr, -hy);
+    path.lineTo(hx - rr, -hy);
+    path.absarc(hx - rr, -hy + rr, rr, -Math.PI * 0.5, 0, false);
+    path.lineTo(hx, hy - rr);
+    path.absarc(hx - rr, hy - rr, rr, 0, Math.PI * 0.5, false);
+    path.lineTo(-hx + rr, hy);
+    path.absarc(-hx + rr, hy - rr, rr, Math.PI * 0.5, Math.PI, false);
+    path.lineTo(-hx, -hy + rr);
+    path.absarc(-hx + rr, -hy + rr, rr, Math.PI, Math.PI * 1.5, false);
+    return path;
   }
 
   /**
@@ -898,7 +888,11 @@ export function buildFace(T = THREE_NS, C = DEFAULT_CONFIG) {
    * annulus, and a chord that short sags by millimetres.)
    */
   function roundedDisc(w, h, r, rings) {
-    const outline = roundRectRim(w, h, r, 4);
+    const outline = roundRect(new T.Shape(), w, h, r).getPoints(5);
+    const first = outline[0];
+    const last = outline[outline.length - 1];
+    if (outline.length > 1 && Math.abs(first.x - last.x) < 1e-6
+        && Math.abs(first.y - last.y) < 1e-6) outline.pop();
     const N = outline.length;
     const pos = new Float32Array((N * rings + 1) * 3);
     for (let k = 1; k <= rings; k++) {
@@ -973,20 +967,59 @@ export function buildFace(T = THREE_NS, C = DEFAULT_CONFIG) {
     brow.position.set(side * LENS_CX, BROW_Y - HIP_Y, 0);
     torso.add(brow);
 
-    // z = 0 is the front face and +depth runs into the body, so the standoff
-    // is simply how far the frame stands proud of the skin: 35mm of frame with
-    // the glass recessed 24mm behind it.
-    const geoFrame = keepGeo(layOnChest(
-      buildFrameGeo(side, LENS_W, LENS_H, 0.062, FRAME_T, 0.062, 0.085, 0.060),
-      side * LENS_CX, FRAME_STANDOFF));
+    // frame ring
+    const ring = new T.Shape();
+    roundRect(ring, LENS_W + FRAME_T * 2, LENS_H + FRAME_T * 2, 0.095);
+    const hole = new T.Path();
+    roundRect(hole, LENS_W, LENS_H, 0.062);
+    ring.holes.push(hole);
+    // half a bridge bar, reaching inboard toward the sternum
+    const bar = new T.Shape();
+    const barW = 0.085;
+    const barX = -side * (LENS_W * 0.5 + FRAME_T + barW * 0.5 - 0.006);
+    bar.moveTo(barX - barW * 0.5, -0.030);
+    bar.lineTo(barX + barW * 0.5, -0.030);
+    bar.lineTo(barX + barW * 0.5, 0.030);
+    bar.lineTo(barX - barW * 0.5, 0.030);
+    bar.closePath();
+
+    // The extrusion runs +Z out of the shape plane and the model faces -Z, so
+    // z = 0 is the front face: the standoff is simply how far it stands proud
+    // of the skin. 35mm of frame, with the glass recessed 22mm behind it.
+    const geoFrame = keepGeo(layOnChest(new T.ExtrudeGeometry([ring, bar], {
+      depth: 0.062, bevelEnabled: false, curveSegments: 5,
+    }), side * LENS_CX, FRAME_STANDOFF));
     const frame = new T.Mesh(geoFrame, matFrame);
     frame.castShadow = shadows;
     brow.add(frame);
 
     const geoLens = keepGeo(layOnChest(
-      roundedDisc(LENS_W + 0.006, LENS_H + 0.006, 0.058, 5),
-      side * LENS_CX, FRAME_STANDOFF - 0.005));
+      roundedDisc(LENS_W + 0.006, LENS_H + 0.006, 0.058, 4),
+      side * LENS_CX, FRAME_STANDOFF - 0.011));
+    // The emeem eyeball, seated behind the glass. Authored in XY like every
+    // other chest decal, then pushed onto the chest surface by layOnChest at a
+    // deeper standoff than the lens so it sits INSIDE the glasses.
+    const EYE_R = LENS_H * 0.40;
+    const eyeBase = new T.SphereGeometry(EYE_R, 16, 12);
+    // Squash along Z, not Y: on the chest, Z is the depth axis, so this is the
+    // same flattened candy-button profile the collectible has.
+    eyeBase.scale(1, 1, 0.45);
+    paintShade(eyeBase, 1);
+    const eyeTip = new T.SphereGeometry(EYE_R * 0.30, 10, 8);
+    eyeTip.scale(1, 1, 1.25);
+    eyeTip.translate(0, 0, EYE_R * 0.36);
+    paintShade(eyeTip, EYE_TIP_SHADE);
+    const geoEye = keepGeo(layOnChest(
+      mergeGeometries([eyeBase, eyeTip], false),
+      side * LENS_CX, FRAME_STANDOFF - 0.030));
+    eyeBase.dispose();
+    eyeTip.dispose();
+    const eyeball = new T.Mesh(geoEye, side < 0 ? matEyeL : matEyeR);
+    eyeball.castShadow = false;
+    brow.add(eyeball);
+
     const lens = new T.Mesh(geoLens, matLens);
+    lens.renderOrder = 2;   // draw after the eyeball so the tint composites over it
     brow.add(lens);
 
     // The coal behind the glass. It sits in FRONT of the lens face but BEHIND
@@ -994,7 +1027,7 @@ export function buildFace(T = THREE_NS, C = DEFAULT_CONFIG) {
     // glow fills the lens and stops dead at the rim.
     const geoGlow = keepGeo(layOnChest(
       new T.PlaneGeometry(LENS_W * 0.98, LENS_H * 1.02, 3, 3),
-      side * LENS_CX, FRAME_STANDOFF - 0.002));
+      side * LENS_CX, FRAME_STANDOFF - 0.017));
     const glow = new T.Mesh(geoGlow, matGlow);
     glow.renderOrder = 3;
     brow.add(glow);

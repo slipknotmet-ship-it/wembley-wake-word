@@ -58,11 +58,12 @@ ground.receiveShadow = true;
 scene.add(ground);
 
 // Load whichever candidates are present; a missing one is not an error.
-const CANDIDATES = ['a', 'b', 'c'];
+// 'final' is the merged rig that gets shipped; a, b, c are the candidates.
+const CANDIDATES = ['final', 'a', 'b', 'c'];
 const built = {};
 for (const key of CANDIDATES) {
   try {
-    const mod = await import(`./src/entities/monsterFace_${key}.js`);
+    const mod = await import(key === 'final' ? './src/entities/monsterFace.js' : `./src/entities/monsterFace_${key}.js`);
     if (typeof mod.buildFace === 'function') built[key] = mod.buildFace(THREE, CONFIG);
   } catch (err) {
     console.warn(`candidate ${key} unavailable:`, err.message);

@@ -84,8 +84,15 @@ const Y_TOP = 3.34;        // crown of the shoulder mass (no head above it)
 const Y_TORSO_BOT = 1.38;  // torso ends inside the shorts
 const Y_GLASSES = 2.70;    // lens centre line - sits exactly on the nipple line
 const Y_NAVEL = 2.04;      // the nose
-const Y_MOUTH = 1.84;      // rest position of the belly fold
-const Y_BAND_TOP = 1.56;   // top of the waistband
+const Y_MOUTH = 1.86;      // rest position of the belly fold
+/**
+ * Top of the waistband. Sits 0.42m below the fold, which is more belly than the
+ * photograph shows - and it has to. At full anger the corners of the frown
+ * travel 0.29m DOWN, and with the shorts up at the photo's height the two
+ * corners disappear behind the waistband: the arc gets clipped into a straight
+ * dark bar exactly when it is supposed to be at its most savage.
+ */
+const Y_BAND_TOP = 1.44;
 
 const HEIGHT = Y_TOP;
 
@@ -103,11 +110,15 @@ const LOBES = new Float64Array([
   // Shoulders are a wide, SHALLOW lobe (aspect 0.33): a rounder one domes up
   // into something that reads as a head, which is the one thing this creature
   // must not have. It closes the top at 3.34.
-  3.08, 0.26, 0.780, 0.250, 0.250,
+  3.08, 0.26, 0.780, 0.285, 0.285,
   2.76, 0.46, 0.720, 0.300, 0.255, // chest - the glasses sit across this
-  2.34, 0.44, 0.600, 0.290, 0.230, // waist pinch
-  1.94, 0.44, 0.680, 0.350, 0.250, // belly roll - the cheeks of the face
-  1.56, 0.32, 0.610, 0.290, 0.225, // lower belly falling into the shorts
+  // The three lower lobes carry more depth than the photo's flatness suggests,
+  // so the thing is not a plank when it banks side-on around an obstacle. The
+  // CHEST lobe is deliberately left alone: the glasses are fitted to its curve
+  // by a hardcoded quadratic (see bendToChest) and moving it unsticks them.
+  2.34, 0.44, 0.600, 0.315, 0.255, // waist pinch
+  1.94, 0.44, 0.680, 0.410, 0.285, // belly roll - the cheeks of the face
+  1.56, 0.32, 0.610, 0.335, 0.250, // lower belly falling into the shorts
 ]);
 const LOBE_COUNT = 5;
 
@@ -141,13 +152,28 @@ const TORSO_RINGS = 24;   // bottom to top
 // Half width. The gain overshoots the belly on purpose - softLimit pins the
 // corners onto the flank, so past about anger 0.6 the extra width stops buying
 // span and starts buying DROP, which is the cue that actually reads.
-const MOUTH_HW0 = 0.34, MOUTH_HW_A = 0.30;
-const ARC0 = 0.055, ARC_A = 0.120;           // quadratic sag of the whole arc
-const COR0 = 0.014, COR_A = 0.105;           // |u|^5 term: corners ONLY
+const MOUTH_HW0 = 0.34, MOUTH_HW_A = 0.24;
+/**
+ * The two curvature terms, and the balance between them is the whole ball game.
+ *
+ * ARC is u^2: it bends the ENTIRE span, so it is what you actually see from
+ * across the map. COR is |u|^5: flat through the middle, then a plunge in the
+ * last fifth - anatomically it is depressor anguli oris, the muscle that hauls
+ * the corners of a real angry mouth down.
+ *
+ * Loading the drop onto COR (0.105 vs 0.120) looked right on paper and rendered
+ * as a straight bar. The reason: the corners land where the belly turns away
+ * from the camera, so their plunge happens at the silhouette edge, nearly
+ * edge-on, and contributes almost no visible curvature. The middle stayed flat
+ * and the whole scowl read as a letterbox. ARC has to carry the drop; COR is
+ * seasoning on top of it.
+ */
+const ARC0 = 0.055, ARC_A = 0.200;
+const COR0 = 0.014, COR_A = 0.055;
 const RISE_A = 0.04;                         // the fold rides up as it bunches
 const LIP_UP0 = 0.022, LIP_UP_A = 0.055;     // upper lip half-thickness
 const LIP_LO0 = 0.030, LIP_LO_A = 0.072;     // lower lip is the fuller one
-const POUT0 = 0.010, POUT_A = 0.055;         // how far the lips stand proud
+const POUT0 = 0.010, POUT_A = 0.042;         // how far the lips stand proud
 const GAP0 = 0.11, GAP_A = 0.34;             // maw height at full open
 const GROOVE0 = 0.030, GROOVE_A = 0.055;     // depth of the closed crease
 const THROAT_MAX = 0.26;                     // cavity can't punch out the back
@@ -253,7 +279,9 @@ function frontZ(x, y, a) {
  * eases into `lim` over the last quarter and never quite reaches it.
  */
 function softLimit(v, lim) {
-  const knee = lim * 0.72;
+  // Knee at 0.86: low knees (0.72) bend the outer THIRD of the lip line toward
+  // one x and flatten the arc where it should be steepest.
+  const knee = lim * 0.86;
   if (v <= knee) return v;
   const span = lim - knee;
   return knee + span * (1 - Math.exp(-(v - knee) / span));
@@ -278,13 +306,18 @@ export function buildFace(THREE_, CONFIG) {
   // The skin comes off CONFIG.palette.hand so the Protector is made of the same
   // meat as the player's hand; the shorts and the frames come off
   // palette.monster; the flush and the throat glow come off palette.monsterEye.
-  const SKIN_CALM = new T.Color(P.hand).multiplyScalar(0.94);
+  // A tanned mid-tone, not the player's pale peach. palette.hand under a 2.7
+  // sun saturates the ACES curve, and once the diffuse clips there is nowhere
+  // for the baked shading to live: the hair, the fold and the armpit hollows
+  // all flatten into one white slab. Dropping it into the responsive part of
+  // the curve is what makes the vertex colours visible at all.
+  const SKIN_CALM = new T.Color(P.hand).lerp(new T.Color(P.handShadow), 0.5).multiplyScalar(0.72);
   // 0.42 toward the eye red turned the whole creature into a traffic cone once
   // the emissive was on top of it. The flush has to be a flush, not a repaint:
   // the silhouette cues are what carry the escalation.
-  const SKIN_HOT = new T.Color(P.hand).lerp(new T.Color(P.monsterEye), 0.26).multiplyScalar(0.88);
+  const SKIN_HOT = new T.Color(P.hand).lerp(new T.Color(P.monsterEye), 0.34).multiplyScalar(0.72);
   const LIP_CALM = new T.Color(P.handShadow).multiplyScalar(0.66);
-  const LIP_HOT = new T.Color(P.handShadow).lerp(new T.Color(P.monsterEye), 0.5).multiplyScalar(0.55);
+  const LIP_HOT = new T.Color(P.handShadow).lerp(new T.Color(P.monsterEye), 0.35).multiplyScalar(0.34);
   const DARK = new T.Color(P.monster);
   const FRAME = new T.Color(P.monster).multiplyScalar(0.45);
 
@@ -401,7 +434,7 @@ export function buildFace(THREE_, CONFIG) {
     m *= 1 - 0.20 * frontal * Math.exp(-((y - arcY) * (y - arcY)) / 0.012);
     // Armpit hollow and the crease where the waistband bites.
     m *= 1 - 0.34 * Math.exp(-((ax - 0.66) * (ax - 0.66) / 0.022 + (y - 2.86) * (y - 2.86) / 0.11));
-    m *= 1 - 0.26 * smoothstep(1.82, 1.48, y);
+    m *= 1 - 0.26 * smoothstep(1.74, 1.40, y);
     // The saddle where the head is missing sits in its own shadow.
     m *= 1 - 0.30 * Math.exp(-(x * x) / 0.10) * smoothstep(2.96, Y_TOP, y);
     return m;
@@ -808,12 +841,12 @@ export function buildFace(THREE_, CONFIG) {
   // them inherit the trunk's lean would shear them off the legs.
   const shorts = new T.Group();
   rig.add(shorts);
-  shorts.add(blob(matDark, 0.60, 0.38, 0.31, 0, 1.32, 0));   // seals the leg holes
+  shorts.add(blob(matDark, 0.60, 0.38, 0.31, 0, 1.20, 0));   // seals the leg holes
   // Barely tapered and only 0.5m deep. Flared, they stop being shorts and
   // become a skirt, which is a different joke entirely.
   const shortsMesh = new T.Mesh(geoTube, matDark);
   shortsMesh.scale.set(0.645, 0.50, 0.325);
-  shortsMesh.position.y = 1.31;
+  shortsMesh.position.y = 1.19;
   shortsMesh.castShadow = shadows;
   shorts.add(shortsMesh);
   const bandMesh = new T.Mesh(geoRing, matBand);
@@ -824,12 +857,12 @@ export function buildFace(THREE_, CONFIG) {
   // ------------------------------------------------------------------ legs --
   const makeLeg = (side) => {
     const hip = new T.Group();
-    hip.position.set(side * 0.28, 1.30, 0);
-    hip.add(limb(0.235, 0.64));
+    hip.position.set(side * 0.28, 1.20, 0);
+    hip.add(limb(0.235, 0.59));
     const knee = new T.Group();
-    knee.position.y = -0.64;
-    knee.add(limb(0.185, 0.54));
-    knee.add(blob(matSkin, 0.155, 0.095, 0.28, 0, -0.55, -0.09)); // bare foot
+    knee.position.y = -0.59;
+    knee.add(limb(0.185, 0.50));
+    knee.add(blob(matSkin, 0.155, 0.095, 0.28, 0, -0.51, -0.09)); // bare foot
     hip.add(knee);
     rig.add(hip);
     return { hip, knee };
@@ -931,7 +964,9 @@ export function buildFace(THREE_, CONFIG) {
       b.position.set(
         side * (BROW_X - 0.03 * a),
         BROW_Y - 0.05 * a,
-        BROW_Z - 0.26 * a,
+        // 0.26 of travel turns the pair into a visor jutting off the chest in
+        // profile. 0.17 breaks the skin cleanly and stops.
+        BROW_Z - 0.17 * a,
       );
       b.rotation.z = side * 0.38 * a;
       b.scale.set(1 + 0.10 * a, 1 + 0.45 * a, 1 + 0.20 * a);
@@ -982,7 +1017,7 @@ export function buildFace(THREE_, CONFIG) {
     // Gated on the gape SQUARED. A closed mouth is a dark crease in flesh - if
     // it glows shut, the frown stops being a fold and becomes a letterbox.
     const gape = clamp01(mouthOpen + chew);
-    matMaw.emissiveIntensity = 0.03 + 1.5 * a2 * gape * gape;
+    matMaw.emissiveIntensity = 0.03 + 0.85 * a2 * gape * gape;
   };
 
   // =========================================================================
