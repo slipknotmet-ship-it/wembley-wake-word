@@ -26,9 +26,12 @@ export const CONFIG = {
     fov: 68,
     near: 0.1,
     far: 260,
-    distance: 8.5,         // metres behind the player
-    height: 4.2,           // metres above the player
-    lookAhead: 2.2,        // metres in front of the player to aim at
+    // Pulled in from 8.5/4.2 after looking at a real render: at ~9.5m out the
+    // hand was 4% of screen height, which is a speck on a 6.9" phone. ~6m out
+    // puts it near 15% and still shows enough road ahead to dodge.
+    distance: 5.4,         // metres behind the player
+    height: 2.9,           // metres above the player
+    lookAhead: 3.4,        // metres in front of the player to aim at
     followLerp: 6.5,       // positional smoothing
     lookLerp: 9.0,         // aim smoothing
     shakeDecay: 5.0,

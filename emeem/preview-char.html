@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Emeem - character preview</title>
+<style>
+  html, body { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#0b0510; }
+  #game-canvas { position:fixed; inset:0; width:100%; height:100%; display:block; }
+  #label {
+    position:fixed; left:0; right:0; bottom:0; padding:8px 14px; z-index:5;
+    font:600 15px/1.4 system-ui, sans-serif; color:#fff;
+    background:linear-gradient(transparent, rgba(0,0,0,.75)); text-shadow:0 1px 3px #000;
+  }
+</style>
+</head>
+<body>
+  <canvas id="game-canvas"></canvas>
+  <div id="label"></div>
+<script type="module">
+/**
+ * Dev-only harness: renderer + world + player (which owns the hand puppet).
+ * Lets the character be inspected and screenshotted before the monster,
+ * emeems, HUD and audio modules exist. Not part of the shipped build.
+ */
+import * as THREE from 'three';
+import { CONFIG } from './src/core/config.js';
+import { state } from './src/core/state.js';
+import { createBus } from './src/core/bus.js';
+import { createRenderer } from './src/engine/renderer.js';
+import { createWorld } from './src/world/world.js';
+import { createPlayer } from './src/entities/player.js';
+
+const engine = createRenderer(document.getElementById('game-canvas'));
+const bus = createBus();
+const noop = () => {};
+const ctx = {
+  THREE, CONFIG, state, bus,
+  scene: engine.scene, camera: engine.camera, renderer: engine.renderer,
+  engine, world: null,
+  // Stubbed so anything that reaches for audio cannot take the preview down.
+  audio: { resume: noop, update: noop, collect: noop, jump: noop, land: noop,
+           roar: noop, levelup: noop, caught: noop },
+  addScore: (n = 1) => { state.score += n; },
+};
+ctx.world = createWorld(ctx);
+const player = createPlayer(ctx);
+
+state.phase = 'playing';
+const label = document.getElementById('label');
+const FIXED = 1 / 120;
+let acc = 0;
+
+/** Camera override: when set, it is re-applied and re-rendered every frame. */
+let camOverride = null;
+
+function renderFrame() {
+  if (camOverride) {
+    engine.camera.position.set(...camOverride.pos);
+    engine.camera.lookAt(...camOverride.look);
+    if (camOverride.fov) { engine.camera.fov = camOverride.fov; engine.camera.updateProjectionMatrix(); }
+  }
+  engine.render();
+}
+
+/** Deterministic stepping - never reads the wall clock. */
+function step(frames = 1, dt = 1 / 60) {
+  for (let i = 0; i < frames; i++) {
+    state.time += dt; state.dt = dt;
+    acc += dt;
+    while (acc >= FIXED) { player.fixedUpdate(FIXED, ctx); acc -= FIXED; }
+    ctx.world.update(dt, ctx);
+    player.update(dt, ctx);
+    engine.update(dt, ctx);
+  }
+  renderFrame();
+}
+
+function setInput(x, z, jump = false) {
+  state.input.x = x; state.input.z = z;
+  if (jump && !state.input.jump) state.input.jumpPressed = true;
+  state.input.jump = jump;
+}
+
+function setTier(index) {
+  const lvl = CONFIG.levels[Math.max(0, Math.min(CONFIG.levels.length - 1, index))];
+  state.levelIndex = index; state.level = lvl; state.score = lvl.score;
+  ctx.world.reset();
+  state.dread = lvl.dread; engine.setDread(lvl.dread);
+}
+
+/** Point the camera at the hand from an arbitrary offset, for close-ups. */
+function orbit(dist, height, angleDeg, fov) {
+  const a = (angleDeg * Math.PI) / 180;
+  const p = state.player.pos;
+  camOverride = {
+    pos: [p.x + Math.sin(a) * dist, p.y + height, p.z + Math.cos(a) * dist],
+    look: [p.x, p.y + 0.45, p.z],
+    fov,
+  };
+  renderFrame();
+}
+function releaseCamera() { camOverride = null; engine.camera.fov = CONFIG.camera.fov; engine.camera.updateProjectionMatrix(); }
+
+function say(t) { label.textContent = t; }
+
+setTier(0);
+step(60);
+window.__PREVIEW__ = { ctx, state, engine, player, step, setInput, setTier, orbit, releaseCamera, say, CONFIG, renderFrame };
+window.__READY__ = true;
+
+let last = performance.now();
+(function loop(now) {
+  requestAnimationFrame(loop);
+  const dt = Math.min((now - last) / 1000, 0.05); last = now;
+  if (window.__AUTOPLAY__ === false) { renderFrame(); return; } // keep the buffer fresh for screenshots
+  setInput(0, 1, false);
+  step(1, dt);
+})(last);
+</script>
+</body>
+</html>
