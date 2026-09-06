@@ -50,6 +50,8 @@ const _qA = new THREE.Quaternion();
 const _qB = new THREE.Quaternion();
 const _qC = new THREE.Quaternion();
 const _qD = new THREE.Quaternion();
+const _qFist = new THREE.Quaternion();
+const _fistEuler = new THREE.Euler();
 const AXIS_X = new THREE.Vector3(1, 0, 0);
 const AXIS_Y = new THREE.Vector3(0, 1, 0);
 const AXIS_Z = new THREE.Vector3(0, 0, 1);
@@ -106,6 +108,26 @@ const IDLE_BOB = 0.012;     // slow claw breathing when standing still
 const REACH_LERP = 9.0;     // how fast the body drops into the reaching pose
 const REACH_PITCH = -0.15;  // radians of extra nose-down dip at full reach
 const FIST_CROUCH = 0.10;   // metres the body settles as the fist closes
+
+/**
+ * A curled finger is NOT an IK problem.
+ *
+ * Two-bone IK aimed at a point near the palm can only ever produce a folded V:
+ * both bones stay in one plane with the joint bulging outward, which reads as a
+ * bent spider leg. A real finger curling into a fist flexes at every joint in
+ * the SAME direction, so it wraps into a spiral, the fingertip tucks against
+ * the palm and the knuckle becomes the leading surface of the hand.
+ *
+ * So the fist is posed by driving the joint angles directly and blending away
+ * from the IK result, rather than by moving the IK target.
+ *
+ * Angles are local radians: FIST_ROOT_X swings the proximal bone down and back
+ * under the palm, FIST_KNEE_X folds the distal bone hard back up toward it.
+ */
+const FIST_ROOT_X = -1.02;
+const FIST_KNEE_X = -2.05;
+/** Fingers converge slightly as they close, as they do on a real hand. */
+const FIST_CONVERGE = 0.16;
 
 /** How fast the airborne pose blends in/out (per second). */
 const AIR_LERP = 13.0;
@@ -539,6 +561,9 @@ export function createHand(threeArg, configArg) {
       entry.tuck = spec.tuck;
       entry.fist = spec.fist;
       entry.strideScale = spec.scale;   // a short finger takes a short step
+      // Which way this finger leans as the fist closes: index side vs pinky
+      // side converge toward the middle rather than staying parallel.
+      entry.fistSide = legs.length === 0 ? -1 : (legs.length === 2 ? 1 : 0);
       entry.phase = LEG_PHASE_OFFSET[legs.length] || 0;
       legs.push(entry);
       // A darker pad on the palm where each leg attaches.
@@ -744,6 +769,16 @@ export function createHand(threeArg, configArg) {
 
       solveTwoBone(leg.root, leg.knee, leg.hip, _foot, leg.l1, leg.l2,
         leg.bendSign, MODE_DOWN, leg.planeYaw);
+
+      // Blend the IK result toward a directly-posed curl. Slerping the whole
+      // root quaternion (rather than nudging the target) is what lets the
+      // finger wrap instead of merely folding.
+      if (fistAmt > 0) {
+        _fistEuler.set(FIST_ROOT_X, leg.planeYaw - FIST_CONVERGE * leg.fistSide, 0);
+        _qFist.setFromEuler(_fistEuler);
+        leg.root.quaternion.slerp(_qFist, fistAmt);
+        leg.knee.rotation.x += (FIST_KNEE_X - leg.knee.rotation.x) * fistAmt;
+      }
     }
 
     // ------------------------------------------------------------- claw ---

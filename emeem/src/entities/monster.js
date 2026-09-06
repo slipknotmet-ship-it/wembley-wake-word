@@ -546,6 +546,10 @@ export function createMonster(ctx) {
   let planTimer = 0;
   let clearAhead = PROBE_MAX; // clearance along the chosen heading, metres
   let directClear = PROBE_MAX; // clearance along the straight line to the player
+  // The probe length those two were measured against. It shrinks to the range
+  // of the player (see planHeading), so the scrape test below has to be read
+  // against it rather than against a fixed distance.
+  let probeLen = PROBE_MAX;
   let scraping = false;     // in contact this step -> config slowdown applies
   let stuckTimer = 0;
   let unstickTimer = 0;
@@ -555,6 +559,13 @@ export function createMonster(ctx) {
 
   // ------------------------------------------------------- animation state
   let gaitPhase = 0;
+  // Gait speed, damped from the achieved velocity. state.monster.vel freezes at
+  // whatever it last was the moment main.js stops stepping the physics, which
+  // it does on the game-over screen - so reading vel directly leaves the thing
+  // standing over your corpse sprinting on the spot for as long as you look at
+  // it. Damping toward zero whenever we are not playing lets it settle into the
+  // idle breathing stride instead, and costs nothing during the chase.
+  let animSpeed = 0;
   // Own clock: state.time freezes on the menu and after you are caught, but the
   // thing standing over your corpse should still breathe.
   let clock = 0;
@@ -639,6 +650,7 @@ export function createMonster(ctx) {
     // Never probe past the player: swerving around a box that is behind your
     // prey is how a chase stops looking like a chase.
     if (dist > 1 && probe > dist) probe = dist;
+    probeLen = probe;
 
     const reach = probe + r;
     _qMin.set(m.pos.x - reach, floorY, m.pos.z - reach);
@@ -759,7 +771,15 @@ export function createMonster(ctx) {
     // The slowdown is the whole reason weaving works: it is paid whenever the
     // monster is in contact with something OR cannot see a straight line to
     // you, so every box you put between the two of you costs it ground.
-    if (scraping || directClear < r * SCRAPE_RADII || clearAhead < r * SCRAPE_RADII) {
+    // The clearances are capped at the probe, and the probe is capped at the
+    // range of the player, so a bare threshold of r * SCRAPE_RADII would read
+    // "the player is two metres away" as "there is a wall two metres away" and
+    // brake the monster to 55% for the last stride of every catch in open
+    // ground - wider still as it grows, since the threshold scales with r.
+    // Clamping the threshold to the probe means an unobstructed line always
+    // scores exactly at it, so only a real hit can come in under.
+    const scrapeDist = Math.min(r * SCRAPE_RADII, probeLen);
+    if (scraping || directClear < scrapeDist || clearAhead < scrapeDist) {
       speed *= M.obstacleSlowdown;
     }
 
@@ -894,7 +914,9 @@ export function createMonster(ctx) {
     // ------------------------------------------------------------ the gait
     // Stride frequency falls out of the physics: metres per second divided by
     // metres per stride. Big monster, long stride, slower and heavier cadence.
-    const sp = Math.hypot(m.vel.x, m.vel.z);
+    const moving = state.phase === 'playing' ? Math.hypot(m.vel.x, m.vel.z) : 0;
+    animSpeed = damp(animSpeed, moving, 6, step);
+    const sp = animSpeed;
     const speedNorm = clamp01(sp / Math.max(0.5, m.speed));
     const strideRate = IDLE_STRIDE_RATE + sp / (STRIDE_LENGTH * Math.max(0.5, m.scale));
     gaitPhase += TAU * strideRate * step;
@@ -995,11 +1017,13 @@ export function createMonster(ctx) {
     planTimer = 0;
     clearAhead = PROBE_MAX;
     directClear = PROBE_MAX;
+    probeLen = PROBE_MAX;
     // A little over half an interval: the first roar lands early enough to tell
     // you something is back there before you have wandered off exploring.
     roarTimer = M.roarInterval * 0.6;
 
     gaitPhase = 0;
+    animSpeed = 0;
     lastDreadWritten = -1;
     body.position.set(0, 0, 0);
     body.rotation.set(0, 0, 0);
