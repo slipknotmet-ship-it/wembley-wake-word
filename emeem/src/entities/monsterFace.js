@@ -682,7 +682,7 @@ export function buildFace(T = THREE_NS, C = DEFAULT_CONFIG) {
    * the tip only needs to be distinguishable; on a face it has to read as a
    * PUPIL from across the map, which needs real contrast against the pale disc.
    */
-  const EYE_PUPIL_SHADE = 0.34;
+  const EYE_PUPIL_SHADE = 0.20;
 
   function paintShade(geo, shade) {
     const n = geo.attributes.position.count;
@@ -696,7 +696,7 @@ export function buildFace(T = THREE_NS, C = DEFAULT_CONFIG) {
     return keepMat(new T.MeshStandardMaterial({
       color: hex, vertexColors: true, roughness: 0.52, metalness: 0.0,
       // Lit from within just enough to carry through the tint and through fog.
-      emissive: new T.Color(hex), emissiveIntensity: 0.34,
+      emissive: new T.Color(hex), emissiveIntensity: 0.44,
     }));
   }
   const matEyeL = makeEyeMat(eyeToneL);
@@ -1016,14 +1016,23 @@ export function buildFace(T = THREE_NS, C = DEFAULT_CONFIG) {
     // shade it vanished behind the tint - the eyes read as two blank discs.
     // Bigger, prouder, and much darker, so it reads as a dot at any distance.
     const eyeTip = new T.SphereGeometry(EYE_R * 0.44, 12, 9);
-    eyeTip.scale(1, 1, 1.35);
+    // Flatter than the collectible's tip. The glasses sit ON the chest, so
+    // there is barely a centimetre of socket behind the lens; a proud tip
+    // simply cannot fit behind the glass and breaks through it instead. The
+    // pupil reads from its darkness and its size, not from its relief.
+    eyeTip.scale(1, 1, 0.55);
     // NEGATIVE z. The creature faces -Z, so the pupil has to protrude that way;
     // translating it +Z buried it inside the disc and the eyes rendered blank.
-    eyeTip.translate(0, 0, -EYE_R * 0.44);
+    eyeTip.translate(0, 0, -EYE_R * 0.16);
     paintShade(eyeTip, EYE_PUPIL_SHADE);
+    // Seated BEHIND the glass, not on it. Measured: at standoff -0.030 the
+    // eyeball spanned z -0.511..-0.295 against a lens front of -0.494, so its
+    // protruding tip broke through the lens plane and the eye read as painted
+    // on the outside. A deeper standoff sinks the whole eyeball into the
+    // socket so the tinted lens composites over all of it.
     const geoEye = keepGeo(layOnChest(
       mergeGeometries([eyeBase, eyeTip], false),
-      side * LENS_CX, FRAME_STANDOFF - 0.030));
+      side * LENS_CX, FRAME_STANDOFF - 0.056));
     eyeBase.dispose();
     eyeTip.dispose();
     const eyeball = new T.Mesh(geoEye, side < 0 ? matEyeL : matEyeR);
