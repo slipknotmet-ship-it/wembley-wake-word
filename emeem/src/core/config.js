@@ -27,6 +27,10 @@ export const CONFIG = {
     reachOpenRate: 13.0,   // how fast the claw spreads as an emeem nears
     pinchSnapRate: 34.0,   // how fast it slams shut on the catch
     pinchHoldTime: 0.11,   // seconds the claw stays clamped after a catch
+    // Height of the pincer above the feet once the hand has lifted. The grab
+    // point tracks from emeem.hoverY up to this as the reach builds, so an
+    // emeem is drawn up into the raised claw instead of to the ground.
+    pinchHeight: 0.62,
     pinchReleaseRate: 6.5, // how fast it relaxes back to neutral afterwards
   },
 

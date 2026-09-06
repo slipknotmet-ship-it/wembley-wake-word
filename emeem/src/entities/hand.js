@@ -83,10 +83,10 @@ const STRIDE_MAX = 0.26;
 /** Peak fingertip lift during the swing half of the cycle. */
 const LEG_LIFT = 0.17;
 /** Legs are offset by a third of a cycle each: a proper three-beat gait. */
-// Two walking fingers, half a cycle apart. The hand walks on index and middle
-// the way a real hand does the two-finger walk; ring and pinky stay curled away
-// into the palm and never take a step.
-const LEG_PHASE_OFFSET = [0, TAU / 2];
+// All five digits walk. The offsets are a travelling wave across the hand
+// rather than an alternating pair: each finger plants just after the one beside
+// it, which is what fingers actually do when they walk on a table.
+const LEG_PHASE_OFFSET = [0, TAU * 0.4, TAU * 0.8, TAU * 0.2, TAU * 0.6];
 
 /** Speeds (m/s) between which the gait fades in, so a standing hand is still. */
 const IDLE_SPEED = 0.25;
@@ -109,8 +109,15 @@ const CLAW_BOB = 0.030;     // claw bounce with each footfall
 const CLAW_SWING = 0.045;   // claw reach oscillation over the stride
 const IDLE_BOB = 0.012;     // slow claw breathing when standing still
 const REACH_LERP = 9.0;     // how fast the body drops into the reaching pose
-const REACH_PITCH = -0.15;  // radians of extra nose-down dip at full reach
-const FIST_CROUCH = 0.10;   // metres the body settles as the fist closes
+// Rears back as it lifts, so the pincer is presented forward and up rather than
+// buried under the palm.
+const REACH_PITCH = 0.30;
+/**
+ * Metres the body RISES as it reaches. Walking is five fingertips on the
+ * ground; taking an emeem lifts the hand up off them into the pincer, which is
+ * the whole silhouette change that makes a catch readable at gameplay distance.
+ */
+const REACH_LIFT = 0.30;
 
 /**
  * A curled finger is NOT an IK problem.
@@ -437,92 +444,73 @@ export function createHand(threeArg, configArg) {
   // thick: extra mesh-only girth, so a thumb can be stubby without being short
   const KNUCKLE_X = [-0.26, -0.10, 0.13, 0.32];  // index, middle, ring, pinky
 
+  const HIP_INDEX = STAND_Y - 0.02 * U;
+  const HIP_THUMB = STAND_Y - 0.05 * U;
+
+  /**
+   * All five digits walk. The hand travels as a splayed hand does on a table -
+   * five contact points spread in a fan - and only lifts into a pincer when
+   * there is something to take.
+   *
+   * `home` is where the fingertip plants, on the ground in GROUP space. They
+   * are deliberately spread wide: packed close together the five fingers read
+   * as one lump rather than as a hand.
+   *
+   * The thumb and index additionally carry reachOpenTip / reachShutTip, which
+   * lift them off the ground into the pincer as an emeem comes into range.
+   */
   const fingerSpecs = [
     {
       id: 'thumb',
-      // A thumb is not a short finger in the finger row. It attaches low and
-      // BACK, near the wrist, off the side of the palm.
-      hip: new T.Vector3(-0.34 * U, STAND_Y - 0.05 * U, -0.02 * U),
-      // Two phalanges against a finger's three: much shorter, much stubbier.
-      scale: 0.72, thick: 1.62, darkTip: false,
-      // Opposed: the knuckle swings out ACROSS the palm rather than bulging in
-      // the vertical plane of its reach, which is what made it read as an
-      // upside-down index finger.
-      bendSign: -1, mode: MODE_FORWARD, planeYaw: 0, bendRoll: 1.15,
-      openTip: new T.Vector3(-0.58 * U, 0.30 * U, -0.26 * U),
-      closedTip: new T.Vector3(-0.40 * U, STAND_Y - 0.08 * U, -0.44 * U),
-      airTip: new T.Vector3(-0.64 * U, 0.42 * U, -0.20 * U),
-      // Reaching down for an emeem: the thumb drops below the index and sits
-      // back from it, so the open gap is the diagonal pincer of a real pinch
-      // rather than two fingers side by side.
-      // Pinched, the thumb pad stops 0.10 m ABOVE the index pad - the same gap
-      // the running pose closes to, so the two tip balls press together instead
-      // of occupying the same point. Sharing one target between both fingers
-      // made them interpenetrate completely at every catch (reach ~1, pinch ~1).
-      reachOpenTip: new T.Vector3(-0.52 * U, 0.46 * U, -0.62 * U),
-      reachShutTip: new T.Vector3(-0.40 * U, 0.39 * U, -0.74 * U),
-      swayPhase: 0.0,
+      hip: new T.Vector3(-0.34 * U, HIP_THUMB, -0.02 * U),
+      // Two phalanges against a finger's three: shorter and much thicker.
+      scale: 0.82, thick: 1.58, darkTip: false,
+      // Opposed: its bend plane is rotated well off the finger row's, which is
+      // the difference between a thumb and a short finger.
+      bendSign: 1, mode: MODE_DOWN, planeYaw: 0.95,
+      home: new T.Vector3(-0.52 * U, 0, -0.04 * U),
+      tuck: new T.Vector3(-0.10 * U, -0.26 * U, 0.12 * U),
+      fist: new T.Vector3(-0.10 * U, -0.18 * U, 0.16 * U),
+      // Bottom half of the pincer: swings up and forward to meet the index.
+      reachOpenTip: new T.Vector3(-0.62 * U, 0.44 * U, -0.42 * U),
+      reachShutTip: new T.Vector3(-0.42 * U, 0.55 * U, -0.58 * U),
     },
     {
       id: 'index',
-      hip: new T.Vector3(KNUCKLE_X[0] * U, STAND_Y + 0.02 * U, -0.36 * U),
+      hip: new T.Vector3(-0.34 * U, HIP_INDEX, -0.34 * U),
       scale: 1.05, thick: 1.05, darkTip: false,
-      // The index does double duty: it is a WALKING finger (one of the two the
-      // hand travels on) and it is the top half of the pincer. It solves as a
-      // leg, and the reach targets below pull it up off the ground and forward
-      // to meet the thumb when there is something to pinch.
-      bendSign: 1, mode: MODE_DOWN, planeYaw: 0.10,
-      home: new T.Vector3(-0.30 * U, 0, -0.44 * U),
+      bendSign: 1, mode: MODE_DOWN, planeYaw: 0.14,
+      home: new T.Vector3(-0.44 * U, 0, -0.54 * U),
       tuck: new T.Vector3(-0.06 * U, -0.30 * U, 0.14 * U),
       fist: new T.Vector3(-0.06 * U, -0.20 * U, 0.20 * U),
-      // Rests DOWN with the other fingers: when a hand walks on its fingers the
-      // index is one of them, not an antenna held in the air. It only lifts to
-      // meet the thumb when there is something to pinch, which is what the
-      // reach targets below are for.
-      openTip: new T.Vector3(-0.30 * U, 0.17 * U, -0.60 * U),
-      closedTip: new T.Vector3(-0.40 * U, STAND_Y - 0.08 * U, -0.44 * U),
-      airTip: new T.Vector3(-0.26 * U, 0.44 * U, -0.74 * U),
-      // The index hangs furthest down and forward - it is the long half of the
-      // pincer, and it is what closes up onto the thumb.
-      // The index holds its height and pulls back; the thumb is what travels
-      // down onto it. Kept 0.10 m below the thumb's shut target so neither tip
-      // has to cross through the other on the way in.
-      reachOpenTip: new T.Vector3(-0.30 * U, 0.30 * U, -0.86 * U),
-      reachShutTip: new T.Vector3(-0.40 * U, 0.29 * U, -0.74 * U),
-      swayPhase: 1.1,
+      // Top half of the pincer.
+      reachOpenTip: new T.Vector3(-0.34 * U, 0.62 * U, -0.72 * U),
+      reachShutTip: new T.Vector3(-0.42 * U, 0.55 * U, -0.58 * U),
     },
     {
       id: 'middle',
-      hip: new T.Vector3(KNUCKLE_X[1] * U, HIP_MID, -0.32 * U),
+      hip: new T.Vector3(-0.10 * U, HIP_MID, -0.34 * U),
       scale: 1.00, thick: 1.00, darkTip: true,
       bendSign: 1, mode: MODE_DOWN, planeYaw: 0.0,
-      home: new T.Vector3(-0.14 * U, 0, -0.38 * U),
+      home: new T.Vector3(-0.13 * U, 0, -0.58 * U),
       tuck: new T.Vector3(-0.04 * U, -0.30 * U, 0.16 * U),
-      // Curled tight under the palm for the grab. Pulled in close so the two
-      // bones fold hard and the KNUCKLE juts down - the fist rests on its
-      // knuckles the way a hand does when it braces to pick something up.
-      fist: new T.Vector3(-0.06 * U, -0.20 * U, 0.20 * U),
+      fist: new T.Vector3(-0.04 * U, -0.20 * U, 0.20 * U),
     },
     {
       id: 'ring',
-      hip: new T.Vector3(KNUCKLE_X[2] * U, HIP_RING, -0.26 * U),
+      hip: new T.Vector3(0.16 * U, HIP_RING, -0.28 * U),
       scale: 0.93, thick: 0.94, darkTip: true,
-      // Curled into the palm for the whole game: part of the hand's mass, not a
-      // limb. This is what the reference walk looks like - two fingers down,
-      // the other two already folded away.
-      alwaysCurled: true,
-      bendSign: 1, mode: MODE_DOWN, planeYaw: -0.22,
-      home: new T.Vector3(0.20 * U, 0, -0.28 * U),
+      bendSign: 1, mode: MODE_DOWN, planeYaw: -0.20,
+      home: new T.Vector3(0.22 * U, 0, -0.50 * U),
       tuck: new T.Vector3(0.06 * U, -0.28 * U, 0.16 * U),
       fist: new T.Vector3(0.08 * U, -0.19 * U, 0.20 * U),
     },
     {
       id: 'pinky',
-      hip: new T.Vector3(KNUCKLE_X[3] * U, HIP_PINKY, -0.10 * U),
+      hip: new T.Vector3(0.38 * U, HIP_PINKY, -0.12 * U),
       scale: 0.85, thick: 0.86, darkTip: true,
-      alwaysCurled: true,
-      bendSign: 1, mode: MODE_DOWN, planeYaw: -0.45,
-      home: new T.Vector3(0.44 * U, 0, -0.06 * U),
+      bendSign: 1, mode: MODE_DOWN, planeYaw: -0.42,
+      home: new T.Vector3(0.50 * U, 0, -0.30 * U),
       tuck: new T.Vector3(0.12 * U, -0.26 * U, 0.14 * U),
       fist: new T.Vector3(0.16 * U, -0.18 * U, 0.18 * U),
     },
@@ -741,9 +729,8 @@ export function createHand(threeArg, configArg) {
     _pivot.set(0, STAND_Y, 0).applyQuaternion(rig.quaternion);
     rig.position.set(
       -_pivot.x + noise(nt, 0) * trPos,
-      // Drop onto the knuckles as the fist forms: a hand braced to pinch sits
-      // lower than one standing on extended fingers.
-      STAND_Y - _pivot.y + bob - FIST_CROUCH * U * pinch * pinch + noise(nt, 1) * trPos,
+      // Rise off the fingers as the reach builds.
+      STAND_Y - _pivot.y + bob + REACH_LIFT * U * reach + noise(nt, 1) * trPos,
       // A little forward shift over the feet at speed; the lean alone reads as
       // tipping over rather than as driving forward.
       -_pivot.z - LUNGE * U * speedF * (1 - air) + noise(nt, 2) * trPos * 0.7,

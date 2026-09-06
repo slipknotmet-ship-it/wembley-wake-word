@@ -36,22 +36,26 @@ const frames = await page.evaluate(() => {
     { a: -95,  label: 'side' },
     { a: -45,  label: 'back three-quarter' },
   ];
-  const capture = (state) => {
+  const capture = (state, aimY = 0.30, dist = 1.9) => {
     for (const A of ANGLES) {
       const p = s.player.pos;
-      P.orbitAt(p.x, p.y + 0.30, p.z - 0.10, 1.9, 0.72, A.a, 40);
+      P.orbitAt(p.x, p.y + aimY, p.z - 0.10, dist, 0.72, A.a, 40);
       out.push({ img: canvas.toDataURL('image/png'), caption: `${state} - ${A.label}` });
     }
   };
 
-  // Open: standing still, nothing in range.
-  P.setInput(0, 0); P.step(90);
-  capture('OPEN');
+  // Walking: five fingertips on the ground, nothing in range.
+  P.hideEmeem(); P.setInput(0, 1); P.step(140);
+  // The five-finger splay has a much wider footprint than the old three-leg
+  // stance, so it needs more room in frame.
+  capture('WALKING', 0.34, 2.6);
 
-  // Clenched: hold the grab open by re-firing it, so the pose settles at full.
-  for (let i = 0; i < 40; i++) { P.ctx.bus.emit('collect', { position: p0(), color: 0, score: 1 }); P.step(1, 1 / 60); }
-  function p0() { return s.player.pos; }
-  capture('CLENCHED');
+  // Reaching: an emeem in close, so the hand lifts into the pincer.
+  P.setInput(0, 0); P.step(10);
+  for (let i = 0; i < 90; i++) { P.showEmeem(1.3, 0.0); P.step(1, 1 / 60); }
+  // Aim higher and stand further back: the body has risen out of the walking
+  // frame, which is the entire point of the pose.
+  capture('REACHING - lifted', 0.62, 2.4);
   return out;
 });
 
@@ -65,8 +69,8 @@ await strip.setContent(`
     figure { margin:0; } img { width:100%; display:block; border-radius:7px; background:#000; }
     figcaption { padding-top:5px; font-size:12px; color:#8b98ab; }
   </style>
-  <h1>Emeem &mdash; open hand vs clenched fist</h1>
-  <p>Same three angles for each. The curl is posed by joint angles now, not by aiming the IK at the palm.</p>
+  <h1>Emeem &mdash; walking vs reaching</h1>
+  <p>Walking on all five fingertips; lifting up into the pincer when an emeem is in range. Same three angles for each.</p>
   <div class="grid">
     ${frames.map(f => `<figure><img src="${f.img}"><figcaption>${f.caption}</figcaption></figure>`).join('')}
   </div>
