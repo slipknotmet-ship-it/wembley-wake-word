@@ -135,7 +135,7 @@ function noise(t, seed) {
 /**
  * Concatenates already-transformed indexed geometries that share the standard
  * position/normal/uv attribute set into one BufferGeometry. Build time only:
- * it collapses the eight static body parts into two draw calls, which matters
+ * it collapses the eleven static body parts into two draw calls, which matters
  * a lot more on a mobile tiler than the triangles do.
  */
 function mergeParts(T, parts) {
@@ -304,12 +304,12 @@ export function createHand(threeArg, configArg) {
   // bone is one merged mesh - capsule plus its joint balls - so a whole finger
   // costs two draw calls instead of five.
   const proxParts = [
-    new T.CapsuleGeometry(R_PROX, Math.max(0.01, BONE_L1 - 2 * R_PROX), 4, 8)
+    new T.CapsuleGeometry(R_PROX, Math.max(0.01, BONE_L1 - 2 * R_PROX), 4, 10)
       .translate(0, -BONE_L1 * 0.5, 0),
     new T.SphereGeometry(R_PROX * 1.15, 8, 6),           // the palm knuckle
   ];
   const distParts = [
-    new T.CapsuleGeometry(R_DIST, Math.max(0.01, BONE_L2 - 2 * R_DIST), 4, 8)
+    new T.CapsuleGeometry(R_DIST, Math.max(0.01, BONE_L2 - 2 * R_DIST), 4, 10)
       .translate(0, -BONE_L2 * 0.5, 0),
     new T.SphereGeometry(R_DIST * 1.2, 8, 6),            // the mid knuckle
     new T.SphereGeometry(R_DIST * 1.25, 8, 6).translate(0, -BONE_L2, 0), // fingertip
@@ -331,10 +331,10 @@ export function createHand(threeArg, configArg) {
   group.add(rig);
 
   // --------------------------------------------------------- palm and body
-  // A squashed ellipsoid reads as a palm from three metres away where a box
-  // reads as a crate. It gets tapered toward the wrist so the silhouette has a
+  // A squashed ellipsoid reads as a palm where a box reads as a crate, and the
+  // chase camera sits close enough that the silhouette wants real segments. It gets tapered toward the wrist so the silhouette has a
   // wide knuckle edge and a narrow heel - that taper is most of the "hand".
-  const palmGeo = new T.SphereGeometry(1, 16, 11);
+  const palmGeo = new T.SphereGeometry(1, 20, 13);
   palmGeo.scale(PALM_W, PALM_H, PALM_D);
   {
     const pos = palmGeo.attributes.position;
@@ -358,7 +358,7 @@ export function createHand(threeArg, configArg) {
 
   const skinParts = [
     palmGeo.clone().translate(0, STAND_Y, 0),
-    new T.CapsuleGeometry(WRIST_R, Math.max(0.01, WRIST_LEN - 2 * WRIST_R), 4, 8)
+    new T.CapsuleGeometry(WRIST_R, Math.max(0.01, WRIST_LEN - 2 * WRIST_R), 5, 12)
       .rotateX(WRIST_TILT)
       .translate(0, wristMidY, wristMidZ),
   ];
@@ -396,9 +396,11 @@ export function createHand(threeArg, configArg) {
       scale: 1.05, thick: 1.05, darkTip: false,
       // Top half of the claw: knuckle up (+1), tip curls down to meet the thumb.
       bendSign: 1, mode: MODE_FORWARD, planeYaw: 0,
-      openTip: new T.Vector3(-0.28 * U, STAND_Y + 0.14 * U, -1.00 * U),
+      // Held high enough that the open claw silhouettes against the ground
+      // rather than lying in it, seen from the chase camera's shallow stoop.
+      openTip: new T.Vector3(-0.28 * U, STAND_Y + 0.20 * U, -1.00 * U),
       closedTip: new T.Vector3(-0.35 * U, STAND_Y - 0.03 * U, -0.80 * U),
-      airTip: new T.Vector3(-0.24 * U, STAND_Y + 0.26 * U, -1.02 * U),
+      airTip: new T.Vector3(-0.24 * U, STAND_Y + 0.32 * U, -1.02 * U),
       swayPhase: 1.1,
     },
     {
@@ -488,10 +490,12 @@ export function createHand(threeArg, configArg) {
       claw.push(entry);
     }
 
-    // A skin-coloured knuckle bump on the back of the hand above each finger
-    // root, so the top surface has a knuckle line instead of being a bald dome.
+    // A knuckle bump on the back of the hand above each finger root. The chase
+    // camera spends the whole game looking down at this surface, so the bumps
+    // are both proud AND in the shadow tint: without them the back of the hand
+    // is a bald dome from the only angle the player ever sees it.
     if (spec.id !== 'thumb') {
-      skinParts.push(
+      shadowParts.push(
         new T.SphereGeometry(0.082 * U, 8, 6)
           .scale(1, 0.7, 1)
           .translate(spec.hip.x, STAND_Y + PALM_H * 0.42, spec.hip.z * 0.86),
@@ -586,15 +590,23 @@ export function createHand(threeArg, configArg) {
     const trPos = TREMBLE_POS * U * fear;
     const trRot = TREMBLE_ROT * fear;
 
-    rig.position.set(
-      noise(nt, 0) * trPos,
-      bob + noise(nt, 1) * trPos,
-      noise(nt, 2) * trPos * 0.7,
-    );
     rig.rotation.set(
       lean + noise(nt, 3) * trRot,
       wag + noise(nt, 4) * trRot,
       roll + noise(nt, 5) * trRot,
+    );
+
+    // Pitch and roll about the PALM, not about the group origin down on the
+    // floor: `position = p - R*p + t` rotates the body in place. With the naive
+    // origin pivot a 14 degree lean swings the claw a third of a metre toward
+    // the ground, because the claw is a metre out along the moment arm.
+    _pivot.set(0, STAND_Y, 0).applyQuaternion(rig.quaternion);
+    rig.position.set(
+      -_pivot.x + noise(nt, 0) * trPos,
+      STAND_Y - _pivot.y + bob + noise(nt, 1) * trPos,
+      // A little forward shift over the feet at speed; the lean alone reads as
+      // tipping over rather than as driving forward.
+      -_pivot.z - LUNGE * U * speedF * (1 - air) + noise(nt, 2) * trPos * 0.7,
     );
 
     // Foot targets are authored on the ground in GROUP space; pull them back
@@ -634,16 +646,22 @@ export function createHand(threeArg, configArg) {
     // ------------------------------------------------------------- claw ---
     for (let i = 0; i < claw.length; i++) {
       const f = claw[i];
-      _tip.copy(f.openTip).lerp(f.closedTip, pinchShaped);
       // Jump pose: throw the claw wide. It is the clearest airborne read there
-      // is, because the two forward fingers own the silhouette.
+      // is, because the two forward fingers own the silhouette. The splay is
+      // applied to the OPEN pose and the pinch closes from there, so a catch
+      // made in mid-air still shuts the claw properly.
+      _tip.copy(f.openTip);
       if (air > 0) _tip.lerp(f.airTip, air);
+      _tip.lerp(f.closedTip, pinchShaped);
 
       // The claw rides the run: a bounce per footfall and a reach per stride.
       _tip.y += CLAW_BOB * U * moving * Math.sin(bobPhase + f.swayPhase);
       _tip.z += CLAW_SWING * U * moving * Math.sin(gaitPhase + f.swayPhase);
       // Slow breathing while idle, so a standing hand is never dead on screen.
-      _tip.y += IDLE_BOB * U * (1 - moving) * Math.sin(time * 1.7 + f.swayPhase);
+      // It fades out as the claw closes: a pinch that keeps wobbling looks like
+      // the catch never quite landed.
+      _tip.y += IDLE_BOB * U * (1 - moving) * (1 - pinchShaped) *
+                Math.sin(time * 1.7 + f.swayPhase);
 
       solveTwoBone(f.root, f.knee, f.hip, _tip, f.l1, f.l2,
         f.bendSign, MODE_FORWARD, 0);

@@ -52,6 +52,14 @@ const LAND_TOL = 0.06;
 /** Below this horizontal speed we hold the previous facing instead of snapping. */
 const YAW_MIN_SPEED = 0.4;
 
+/**
+ * Which way the hand puppet is modelled. true = its fingers point down its own
+ * -Z, which is Three's forward (what lookAt orients) and means yaw 0 already
+ * faces away from the fixed chase camera. If the hand ever ships pointing at
+ * the camera instead, this single flag is the fix - nothing else changes.
+ */
+const HAND_FACES_NEG_Z = true;
+
 /** Pinch relaxes back open at this exponential rate (1 -> ~0.05 in 0.37s). */
 const PINCH_DECAY = 8;
 
@@ -258,8 +266,8 @@ export function createPlayer(ctx) {
     const world = (c && c.world) || ctx.world;
     const p = state.player;
     const inp = state.input;
-    const dt = dtFixed > 0 ? dtFixed : 0;
-    if (dt === 0) return;
+    if (!(dtFixed > 0)) return;
+    const dt = dtFixed;
 
     // -- desired direction ------------------------------------------------
     // Fixed camera heading: input maps straight onto world axes, and "forward"
@@ -275,6 +283,9 @@ export function createPlayer(ctx) {
     wx = p.pos.x; wy = p.pos.y; wz = p.pos.z;
     wvx = p.vel.x; wvy = p.vel.y; wvz = p.vel.z;
     wGrounded = false;
+    // Highest surface found under our feet this step; -Infinity until something
+    // (a box top, a step-up, or the ground plane) claims it.
+    wSupport = -Infinity;
 
     // -- horizontal acceleration -----------------------------------------
     if (wantMove) {
@@ -347,7 +358,6 @@ export function createPlayer(ctx) {
     wy += wvy * dt;
 
     const gy = world ? world.sampleGroundY(wx, wz) : CONFIG.world.groundY;
-    wSupport = gy;
     if (world) resolveVertical(world, prevY);
 
     // The ground plane itself is not a collider, so clamp to it last.
@@ -357,6 +367,7 @@ export function createPlayer(ctx) {
       wGrounded = true;
       if (gy > wSupport) wSupport = gy;
     }
+    if (!Number.isFinite(wSupport)) wSupport = gy; // airborne: report the terrain
 
     // Paranoia: one NaN anywhere would poison pos, the camera and the world
     // streamer for the rest of the run. Recover to the spawn point instead.
@@ -404,10 +415,11 @@ export function createPlayer(ctx) {
 
     const speed = Math.hypot(p.vel.x, p.vel.z);
     if (speed > YAW_MIN_SPEED) {
-      // The hand model faces its own -Z (Three's forward, matching lookAt), so
-      // the yaw that points it along the velocity is atan2(-vx, -vz). Damp
+      // Yaw that points the model's forward axis along the velocity. Damp
       // along the SHORTEST path or it unwinds the long way at the +/-PI seam.
-      const target = Math.atan2(-p.vel.x, -p.vel.z);
+      const target = HAND_FACES_NEG_Z
+        ? Math.atan2(-p.vel.x, -p.vel.z)
+        : Math.atan2(p.vel.x, p.vel.z);
       const diff = wrapPi(target - p.yaw);
       p.yaw = wrapPi(p.yaw + diff * (1 - Math.exp(-P.turnLerp * step)));
     }
