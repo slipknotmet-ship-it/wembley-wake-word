@@ -27,7 +27,13 @@ const AudioCtor =
     ? window.AudioContext || window.webkitAudioContext || null
     : null;
 
-const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+/**
+ * NaN-safe on purpose (a bare `v < lo ? ...` passes NaN straight through).
+ * Assigning NaN to an AudioParam throws - the WebIDL `float` conversion
+ * rejects non-finite values - and a single throw here would take the whole
+ * audio module down for the rest of the session.
+ */
+const clamp = (v, lo, hi) => (v >= lo ? (v <= hi ? v : hi) : lo);
 /** semitones -> frequency ratio */
 const semi = (n) => Math.pow(2, n / 12);
 /** exponentialRampToValueAtTime refuses zero, so every envelope floors here. */
@@ -71,6 +77,7 @@ export function createAudio(ctx) {
   let warned = false;
   let visHooked = false;
   let updateFails = 0;
+  let oneShotFails = 0;
 
   // --- adaptive layer state ------------------------------------------------
   let droneFilter = null;
@@ -95,6 +102,16 @@ export function createAudio(ctx) {
       // failures and silent gameplay is not a failure.
       console.warn('[emeem/audio] disabled:', err && err.message ? err.message : err);
     }
+  }
+
+  /**
+   * A single one-shot voice blew up. One bad event - a NaN that slipped past a
+   * caller, a browser bug on an exotic node - must not silence the rest of the
+   * run, so this tolerates a handful before giving up. A context that has
+   * genuinely gone away throws on every call and trips the limit immediately.
+   */
+  function softFail(err) {
+    if (++oneShotFails > 6) fail(err);
   }
 
   const live = () => !!ac && !broken;
@@ -146,7 +163,11 @@ export function createAudio(ctx) {
    */
   function panFor(pos, spread = 0.55, range = 7) {
     if (!pos || !state0 || !state0.player) return 0;
-    return clamp((pos.x - state0.player.pos.x) / range, -1, 1) * spread;
+    const dx = pos.x - state0.player.pos.x;
+    // A non-finite world position would otherwise reach StereoPannerNode.pan
+    // and throw, which would cost us every sound for the rest of the run.
+    if (!Number.isFinite(dx)) return 0;
+    return clamp(dx / range, -1, 1) * spread;
   }
 
   // ------------------------------------------------------------ graph build
@@ -303,6 +324,7 @@ export function createAudio(ctx) {
       lastCollectAt = -10;
       nextBeat = t + 0.25;
       updateFails = 0;
+      oneShotFails = 0;
     } catch (err) {
       fail(err);
     }
@@ -372,7 +394,7 @@ export function createAudio(ctx) {
       nz.connect(bp);
       bp.connect(gainEnv(t, 0.085, 0.0015, 0.045, dst));
     } catch (err) {
-      fail(err);
+      softFail(err);
     }
   }
 
@@ -403,15 +425,19 @@ export function createAudio(ctx) {
       nz.connect(bp);
       bp.connect(gainEnv(t, 0.075, 0.01, 0.18, sfxBus));
     } catch (err) {
-      fail(err);
+      softFail(err);
     }
   }
 
   /**
-   * Soft thud. `impact` is accepted either normalised (0..1) or as a raw fall
-   * speed in m/s - anything above 1.5 is treated as m/s and scaled against
-   * CONFIG.player.maxFallSpeed, so this stays correct whichever the player
-   * controller ends up sending.
+   * Soft thud. entities/player.js emits `impact` as the raw downward speed at
+   * the moment of contact, in m/s, so it is normalised here against the
+   * terminal fall speed.
+   *
+   * The square root is a loudness curve, not a fudge: an ordinary jump lands
+   * at about 8 m/s out of a possible 38, so a linear map would squash every
+   * landing the player actually hears into the bottom fifth of the range and
+   * the thud would never audibly scale with the drop at all.
    */
   function land(e) {
     if (!live()) return;
@@ -420,9 +446,9 @@ export function createAudio(ctx) {
       if (t - lastLandAt < 0.05) return;
       lastLandAt = t;
 
-      let imp = Math.abs(Number(e && e.impact != null ? e.impact : 0.5)) || 0;
-      if (imp > 1.5) imp = imp / Math.abs(CONFIG.player.maxFallSpeed);
-      imp = clamp(imp, 0, 1);
+      // 4 m/s is the fallback: a short hop, not a fall.
+      const raw = Math.abs(Number(e && e.impact != null ? e.impact : 4)) || 0;
+      const imp = Math.sqrt(clamp(raw / Math.abs(CONFIG.player.maxFallSpeed), 0, 1));
 
       let dst = sfxBus;
       const pn = panNode(panFor(e && e.position, 0.35));
@@ -445,7 +471,7 @@ export function createAudio(ctx) {
       nz.connect(lp);
       lp.connect(gainEnv(t, 0.05 + 0.13 * imp, 0.003, 0.1, dst));
     } catch (err) {
-      fail(err);
+      softFail(err);
     }
   }
 
@@ -486,8 +512,18 @@ export function createAudio(ctx) {
       g.gain.exponentialRampToValueAtTime(EPS, t + dur);
       g.gain.setValueAtTime(0, t + dur + 0.01);
 
+      // The growl is its own gain stage IN SERIES with the envelope, never a
+      // signal summed into the envelope's gain param. Summed, the LFO keeps
+      // adding its own swing after the envelope has decayed to zero, so every
+      // roar used to end in a 50ms unenveloped burp at up to 40% of peak while
+      // the sawtooths ran on to their stop time - and the same swing leaked
+      // through underneath the attack.
+      const trem = ac.createGain();
+      trem.gain.value = 1;
+
       shaper.connect(lp);
-      lp.connect(g);
+      lp.connect(trem);
+      trem.connect(g);
       g.connect(sfxBus);
 
       // Amplitude growl. 27 Hz reads as a snarl; 14 Hz reads as something far
@@ -497,9 +533,9 @@ export function createAudio(ctx) {
       lfo.frequency.setValueAtTime(27 - 13 * i, t);
       lfo.frequency.linearRampToValueAtTime(18 - 8 * i, t + dur);
       const lfoAmt = ac.createGain();
-      lfoAmt.gain.value = peak * 0.4; // stays under the envelope peak
+      lfoAmt.gain.value = 0.4; // depth around unity: the gain swings 0.6 .. 1.4
       lfo.connect(lfoAmt);
-      lfoAmt.connect(g.gain);
+      lfoAmt.connect(trem.gain);
       lfo.start(t); lfo.stop(t + dur + 0.05);
 
       // Slow, uneven pitch wobble on the sawtooths. Human and animal calls are
@@ -552,7 +588,7 @@ export function createAudio(ctx) {
       th.connect(gainEnv(t, 0.16 + 0.2 * i, 0.008, 0.3, sfxBus));
       th.start(t); th.stop(t + 0.34);
     } catch (err) {
-      fail(err);
+      softFail(err);
     }
   }
 
@@ -626,7 +662,7 @@ export function createAudio(ctx) {
       sh.connect(lp);
       lp.connect(gainEnv(ht, 0.16, 0.004, 0.3, sfxBus));
     } catch (err) {
-      fail(err);
+      softFail(err);
     }
   }
 
@@ -696,7 +732,7 @@ export function createAudio(ctx) {
       // The heartbeat stops dead rather than fading with the phase change.
       nextBeat = t + 3;
     } catch (err) {
-      fail(err);
+      softFail(err);
     }
   }
 

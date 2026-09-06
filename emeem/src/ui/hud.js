@@ -34,7 +34,13 @@ const LEVEL_TAGLINES = [
 
 const FALLBACK_CANDY = [0xff4d5a, 0xffb43d, 0x3ddc84, 0x4da3ff, 0xc46bff, 0xfff06b];
 
-function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+/**
+ * Clamp to 0..1. Written so a NaN lands on 0 rather than propagating: this is
+ * the funnel every proximity, opacity and smoothstep value passes through, and
+ * one NaN reaching `smoothProx` would poison the damped accumulator for the
+ * rest of the run (and write an invalid opacity every frame forever).
+ */
+function clamp01(v) { return v > 0 ? (v < 1 ? v : 1) : 0; }
 
 /** Hermite ramp: 0 below `a`, 1 above `b`, smooth in between. */
 function smoothstep(a, b, v) {
@@ -485,6 +491,9 @@ export function createHUD(uiRootEl, ctx) {
     // main.js folds the run into `best` before calling us, so a record run
     // arrives as score === best. Only celebrate a run that actually scored.
     newBest.hidden = !(s > 0 && s >= b);
+    // Dying inside 2.2s of a tier-up is common (the tier-up is what speeds him
+    // up); without this the banner ghosts through the card's scrim.
+    bannerT = 0;
     startOv.classList.add('emhud-off');
     overOv.classList.remove('emhud-off');
   }
@@ -494,7 +503,12 @@ export function createHUD(uiRootEl, ctx) {
     overOv.classList.add('emhud-off');
     // Clear a banner left over from the previous run.
     bannerT = 0;
+    // update() only writes the score transform while pop > 0, so zeroing pop
+    // on its own would freeze the score box wherever the punch had got to.
+    // Restarting mid-punch is reachable: collect, get caught, tap RUN AGAIN.
     pop = 0;
+    if (lastScoreScale !== 1) { lastScoreScale = 1; scoreBox.style.transform = 'scale(1)'; }
+    setScoreGlow(0);
   }
 
   // ------------------------------------------------------------- update ---
@@ -535,8 +549,11 @@ export function createHUD(uiRootEl, ctx) {
     // Damp toward the real proximity. 12/s reaches ~99% in a quarter second,
     // fast enough to feel live, slow enough to swallow a respawn jump.
     const target = playing ? clamp01(s.monster ? s.monster.proximity : 0) : 0;
+    // k is 0 when step is 0, so a zero-length frame holds the current value
+    // instead of snapping straight onto the target (which would defeat the
+    // whole point of the damping the first time two rAFs share a timestamp).
     const k = 1 - Math.exp(-12 * step);
-    smoothProx += (target - smoothProx) * (step > 0 ? k : 1);
+    smoothProx += (target - smoothProx) * k;
     const p = clamp01(smoothProx);
 
     // A bar pinned at zero reads as "broken", so it never fully empties.

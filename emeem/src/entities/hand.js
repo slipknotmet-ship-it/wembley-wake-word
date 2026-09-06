@@ -83,7 +83,10 @@ const STRIDE_MAX = 0.26;
 /** Peak fingertip lift during the swing half of the cycle. */
 const LEG_LIFT = 0.17;
 /** Legs are offset by a third of a cycle each: a proper three-beat gait. */
-const LEG_PHASE_OFFSET = [0, TAU / 3, (TAU * 2) / 3];
+// Two walking fingers, half a cycle apart. The hand walks on index and middle
+// the way a real hand does the two-finger walk; ring and pinky stay curled away
+// into the palm and never take a step.
+const LEG_PHASE_OFFSET = [0, TAU / 2];
 
 /** Speeds (m/s) between which the gait fades in, so a standing hand is still. */
 const IDLE_SPEED = 0.25;
@@ -464,8 +467,14 @@ export function createHand(threeArg, configArg) {
       id: 'index',
       hip: new T.Vector3(KNUCKLE_X[0] * U, STAND_Y + 0.02 * U, -0.36 * U),
       scale: 1.05, thick: 1.05, darkTip: false,
-      // Top half of the claw: knuckle up (+1), tip curls down to meet the thumb.
-      bendSign: 1, mode: MODE_FORWARD, planeYaw: 0,
+      // The index does double duty: it is a WALKING finger (one of the two the
+      // hand travels on) and it is the top half of the pincer. It solves as a
+      // leg, and the reach targets below pull it up off the ground and forward
+      // to meet the thumb when there is something to pinch.
+      bendSign: 1, mode: MODE_DOWN, planeYaw: 0.10,
+      home: new T.Vector3(-0.30 * U, 0, -0.44 * U),
+      tuck: new T.Vector3(-0.06 * U, -0.30 * U, 0.14 * U),
+      fist: new T.Vector3(-0.06 * U, -0.20 * U, 0.20 * U),
       // Rests DOWN with the other fingers: when a hand walks on its fingers the
       // index is one of them, not an antenna held in the air. It only lifts to
       // meet the thumb when there is something to pinch, which is what the
@@ -498,6 +507,10 @@ export function createHand(threeArg, configArg) {
       id: 'ring',
       hip: new T.Vector3(KNUCKLE_X[2] * U, HIP_RING, -0.26 * U),
       scale: 0.93, thick: 0.94, darkTip: true,
+      // Curled into the palm for the whole game: part of the hand's mass, not a
+      // limb. This is what the reference walk looks like - two fingers down,
+      // the other two already folded away.
+      alwaysCurled: true,
       bendSign: 1, mode: MODE_DOWN, planeYaw: -0.22,
       home: new T.Vector3(0.20 * U, 0, -0.28 * U),
       tuck: new T.Vector3(0.06 * U, -0.28 * U, 0.16 * U),
@@ -507,6 +520,7 @@ export function createHand(threeArg, configArg) {
       id: 'pinky',
       hip: new T.Vector3(KNUCKLE_X[3] * U, HIP_PINKY, -0.10 * U),
       scale: 0.85, thick: 0.86, darkTip: true,
+      alwaysCurled: true,
       bendSign: 1, mode: MODE_DOWN, planeYaw: -0.45,
       home: new T.Vector3(0.44 * U, 0, -0.06 * U),
       tuck: new T.Vector3(0.12 * U, -0.26 * U, 0.14 * U),
@@ -516,6 +530,7 @@ export function createHand(threeArg, configArg) {
 
   const legs = [];
   const claw = [];
+  let walkers = 0;   // how many gait slots have been handed out
 
   for (let i = 0; i < fingerSpecs.length; i++) {
     const spec = fingerSpecs[i];
@@ -564,7 +579,12 @@ export function createHand(threeArg, configArg) {
       // Which way this finger leans as the fist closes: index side vs pinky
       // side converge toward the middle rather than staying parallel.
       entry.fistSide = legs.length === 0 ? -1 : (legs.length === 2 ? 1 : 0);
-      entry.phase = LEG_PHASE_OFFSET[legs.length] || 0;
+      entry.alwaysCurled = !!spec.alwaysCurled;
+      entry.reachOpenTip = spec.reachOpenTip;
+      entry.reachShutTip = spec.reachShutTip;
+      // Curled fingers are not limbs, so they do not consume a gait slot.
+      entry.phase = spec.alwaysCurled ? 0 : (LEG_PHASE_OFFSET[walkers] || 0);
+      if (!spec.alwaysCurled) walkers++;
       legs.push(entry);
       // A darker pad on the palm where each leg attaches.
       shadowParts.push(
@@ -741,7 +761,7 @@ export function createHand(threeArg, configArg) {
       const ph = gaitPhase + leg.phase;
       const s = Math.sin(ph);
       const c = Math.cos(ph);
-      const stride = strideHalf * leg.strideScale;
+      const stride = leg.alwaysCurled ? 0 : strideHalf * leg.strideScale;
 
       // Stance (sin >= 0) plants the foot and slides it backwards at roughly
       // the travel speed; swing (sin < 0) lifts it and swings it forward again.
@@ -752,12 +772,24 @@ export function createHand(threeArg, configArg) {
       );
       _foot.applyMatrix4(_invRig);
 
-      // Grab: the three walking fingers clench into a fist and the hand braces
-      // on its knuckles while the thumb and index do the pinching. Blended on
-      // the IK *target* like the air tuck, so it never fights the solver.
-      if (fistAmt > 0 && leg.fist) {
+      // The index lifts out of the walk to become the top half of the pincer.
+      // Blended AFTER the inverse-rig transform because the claw targets are
+      // authored in rig space while the foot targets are authored on the ground
+      // in group space.
+      if (leg.reachOpenTip && reach > 0) {
+        _tipOpen.copy(leg.reachOpenTip);
+        _tipShut.copy(leg.reachShutTip);
+        _tip.copy(_tipOpen).lerp(_tipShut, pinchShaped);
+        _foot.lerp(_tip, reach);
+      }
+
+      // Ring and pinky are curled away permanently; everything else clenches as
+      // the pinch closes. Blended on the IK *target* like the air tuck, so it
+      // never fights the solver.
+      const fa = leg.alwaysCurled ? 1 : fistAmt;
+      if (fa > 0 && leg.fist) {
         _tuck.copy(leg.hip).add(leg.fist);
-        _foot.lerp(_tuck, fistAmt);
+        _foot.lerp(_tuck, fa);
       }
 
       if (air > 0) {
@@ -773,11 +805,14 @@ export function createHand(threeArg, configArg) {
       // Blend the IK result toward a directly-posed curl. Slerping the whole
       // root quaternion (rather than nudging the target) is what lets the
       // finger wrap instead of merely folding.
-      if (fistAmt > 0) {
+      // The index's shut pose comes from its pincer target, not from the fist
+      // curl - it is pinching, not balling up - so only the non-pincer fingers
+      // get the direct-angle curl.
+      if (fa > 0 && !leg.reachOpenTip) {
         _fistEuler.set(FIST_ROOT_X, leg.planeYaw - FIST_CONVERGE * leg.fistSide, 0);
         _qFist.setFromEuler(_fistEuler);
-        leg.root.quaternion.slerp(_qFist, fistAmt);
-        leg.knee.rotation.x += (FIST_KNEE_X - leg.knee.rotation.x) * fistAmt;
+        leg.root.quaternion.slerp(_qFist, fa);
+        leg.knee.rotation.x += (FIST_KNEE_X - leg.knee.rotation.x) * fa;
       }
     }
 
