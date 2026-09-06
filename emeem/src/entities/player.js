@@ -77,6 +77,23 @@ const CLAW_NEUTRAL = 0.30;
  */
 const REACH_YAW_BIAS = 0.45;
 
+/**
+ * Hard cap on that glance, radians. Without it an emeem 90 degrees off the
+ * travel line swings the hand ~40 degrees while it is still running forward,
+ * and the character reads as sprinting sideways. A glance is a glance.
+ */
+const REACH_YAW_MAX = 0.30;
+
+/**
+ * Distance at which the reach is considered FULL, as a multiple of
+ * emeem.pickupRadius. Ramping all the way down to pickupRadius itself means the
+ * target only hits 1.0 at the instant the emeem is taken, so the damped value
+ * never catches up and the deepest pincer pose never appears in play - measured
+ * at ~0.83 of full reach across eight real pickups. Completing the ramp a
+ * couple of pickup-radii out gives the pose time to actually arrive.
+ */
+const REACH_FULL_AT = 2.2;
+
 /** Landings harder than this shake the camera. A jump apex lands at 8.4 m/s. */
 const LAND_SHAKE_SPEED = 12;
 
@@ -470,7 +487,8 @@ export function createPlayer(ctx) {
     const EM = CONFIG.emeem;
     let reachTarget = 0;
     if (p.hasNearestEmeem && Number.isFinite(p.nearestEmeemDist)) {
-      const span = Math.max(0.001, EM.reachRadius - EM.pickupRadius);
+      const fullAt = EM.pickupRadius * REACH_FULL_AT;
+      const span = Math.max(0.001, EM.reachRadius - fullAt);
       reachTarget = clamp01((EM.reachRadius - p.nearestEmeemDist) / span);
     }
     p.reach = dampTo(p.reach, reachTarget, P.reachOpenRate, step);
@@ -491,7 +509,10 @@ export function createPlayer(ctx) {
       const dz = p.nearestEmeem.z - p.pos.z;
       if (dx * dx + dz * dz > 1e-4) {
         const toEmeem = HAND_FACES_NEG_Z ? Math.atan2(-dx, -dz) : Math.atan2(dx, dz);
-        p.yaw = wrapPi(p.yaw + wrapPi(toEmeem - p.yaw) * REACH_YAW_BIAS * p.reach);
+        let glance = wrapPi(toEmeem - p.yaw) * REACH_YAW_BIAS * p.reach;
+        if (glance > REACH_YAW_MAX) glance = REACH_YAW_MAX;
+        else if (glance < -REACH_YAW_MAX) glance = -REACH_YAW_MAX;
+        p.yaw = wrapPi(p.yaw + glance);
       }
     }
 

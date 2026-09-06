@@ -21,7 +21,10 @@ export const CONFIG = {
     spawnHeight: 2.0,
     // Claw animation. The open is a slow deliberate reach; the snap is fast,
     // because a grab that closes as slowly as it opens reads as a yawn.
-    reachOpenRate: 7.0,    // how fast the claw spreads as an emeem nears
+    // At 7.0 the claw lagged: closing 4.2m -> 1.25m takes only ~0.4s at running
+    // speed, so the pickup fired while the reach was still around 0.85 and the
+    // full pincer-down pose never actually appeared in play. 13 gets there.
+    reachOpenRate: 13.0,   // how fast the claw spreads as an emeem nears
     pinchSnapRate: 34.0,   // how fast it slams shut on the catch
     pinchHoldTime: 0.11,   // seconds the claw stays clamped after a catch
     pinchReleaseRate: 6.5, // how fast it relaxes back to neutral afterwards
@@ -63,7 +66,11 @@ export const CONFIG = {
 
   // ---------------------------------------------------------------- emeems
   emeem: {
-    radius: 0.42,
+    // 0.42 made an 84cm disc - nearly as wide as the hand itself, which only
+    // became obvious once they sat on the ground beside the character rather
+    // than floating above it. This is a thing you pick up, so it is small.
+    // Gameplay is unaffected: pickupRadius is what you actually catch with.
+    radius: 0.22,
     pickupRadius: 1.25,    // generous: this is a phone, not a mouse
     // Density, as emeems per chunkSize^2 of ground. At 4 this worked out to one
     // emeem every 16 metres, which for a game about catching as many as you can

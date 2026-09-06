@@ -124,7 +124,10 @@ const MAGNET_R = E.magnetRadius;
 const MAGNET_R2 = MAGNET_R * MAGNET_R;
 
 /** Halo billboard size, and the pop animation the disc plays when collected. */
-const GLOW_SCALE = E.radius * 4.2;
+// Deliberately a larger multiple than it was: the disc got much smaller, and
+// the halo is what makes an emeem findable at 40m through fog. It carries the
+// visibility now, so it does not scale down one-for-one with the disc.
+const GLOW_SCALE = E.radius * 7.5;
 const POP_TIME = 0.24;
 
 /** Additive one-shot particles fired on pickup. */
