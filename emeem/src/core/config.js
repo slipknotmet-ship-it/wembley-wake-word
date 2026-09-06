@@ -65,7 +65,12 @@ export const CONFIG = {
   emeem: {
     radius: 0.42,
     pickupRadius: 1.25,    // generous: this is a phone, not a mouse
-    perChunk: 4,           // target emeems alive per streamed chunk
+    // Density, as emeems per chunkSize^2 of ground. At 4 this worked out to one
+    // emeem every 16 metres, which for a game about catching as many as you can
+    // meant an almost empty field - two visible in a whole screenshot. 14 puts
+    // roughly 80 in the streamed ring, one every ~8.5m, so there is always one
+    // worth breaking your line for without them carpeting the ground.
+    perChunk: 14,          // target emeems alive per streamed chunk
     bobHeight: 0.28,
     bobSpeed: 2.1,
     spinSpeed: 1.4,

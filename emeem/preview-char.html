@@ -30,6 +30,7 @@ import { createBus } from './src/core/bus.js';
 import { createRenderer } from './src/engine/renderer.js';
 import { createWorld } from './src/world/world.js';
 import { createPlayer } from './src/entities/player.js';
+import { createEmeems } from './src/entities/emeem.js';
 
 const engine = createRenderer(document.getElementById('game-canvas'));
 const bus = createBus();
@@ -45,6 +46,7 @@ const ctx = {
 };
 ctx.world = createWorld(ctx);
 const player = createPlayer(ctx);
+const emeems = createEmeems(ctx);
 
 state.phase = 'playing';
 const label = document.getElementById('label');
@@ -70,6 +72,7 @@ function step(frames = 1, dt = 1 / 60) {
     acc += dt;
     while (acc >= FIXED) { player.fixedUpdate(FIXED, ctx); acc -= FIXED; }
     ctx.world.update(dt, ctx);
+    emeems.update(dt, ctx);
     player.update(dt, ctx);
     engine.update(dt, ctx);
   }
@@ -86,6 +89,7 @@ function setTier(index) {
   const lvl = CONFIG.levels[Math.max(0, Math.min(CONFIG.levels.length - 1, index))];
   state.levelIndex = index; state.level = lvl; state.score = lvl.score;
   ctx.world.reset();
+  emeems.reset();
   state.dread = lvl.dread; engine.setDread(lvl.dread);
 }
 
@@ -100,6 +104,22 @@ function orbit(dist, height, angleDeg, fov) {
   };
   renderFrame();
 }
+/** Orbit an arbitrary world point, for framing something other than the hand. */
+function orbitAt(tx, ty, tz, dist, height, angleDeg, fov) {
+  const a = (angleDeg * Math.PI) / 180;
+  camOverride = {
+    pos: [tx + Math.sin(a) * dist, ty + height, tz + Math.cos(a) * dist],
+    look: [tx, ty, tz],
+    fov,
+  };
+  renderFrame();
+}
+
+/** World position of the emeem currently nearest the player, or null. */
+function nearestEmeemPos() {
+  return state.player.hasNearestEmeem ? state.player.nearestEmeem.clone() : null;
+}
+
 function releaseCamera() { camOverride = null; engine.camera.fov = CONFIG.camera.fov; engine.camera.updateProjectionMatrix(); }
 
 function say(t) { label.textContent = t; }
@@ -137,7 +157,7 @@ function hideEmeem() {
 
 setTier(0);
 step(60);
-window.__PREVIEW__ = { ctx, state, engine, player, step, setInput, setTier, orbit, releaseCamera, say, CONFIG, renderFrame, showEmeem, hideEmeem };
+window.__PREVIEW__ = { ctx, state, engine, player, emeems, step, setInput, setTier, orbit, orbitAt, nearestEmeemPos, releaseCamera, say, CONFIG, renderFrame, showEmeem, hideEmeem };
 window.__READY__ = true;
 
 let last = performance.now();
