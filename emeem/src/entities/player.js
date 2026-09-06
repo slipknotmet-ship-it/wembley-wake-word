@@ -371,8 +371,12 @@ export function createPlayer(ctx) {
       // Accelerate toward the target velocity at a capped rate; air control
       // trims how much authority you keep once your feet leave the ground.
       const accel = P.accel * (grounded0 ? 1 : P.airControl);
-      const ddx = dx * P.walkSpeed - wvx;
-      const ddz = dz * P.walkSpeed - wvz;
+      // Slow as the hand commits to a grab. This is what gives the reach time
+      // to play out without widening the trigger radius, and it makes taking an
+      // emeem cost real ground on the Protector rather than being free.
+      const reachSpeed = P.walkSpeed * (1 - P.reachSlowdown * state.player.reach);
+      const ddx = dx * reachSpeed - wvx;
+      const ddz = dz * reachSpeed - wvz;
       const need = Math.hypot(ddx, ddz);
       if (need > 1e-6) {
         const maxStep = accel * dt;

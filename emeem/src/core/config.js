@@ -17,14 +17,27 @@ export const CONFIG = {
     maxFallSpeed: -38,
     coyoteTime: 0.12,      // grace period to jump after leaving ground
     jumpBuffer: 0.15,      // grace period to buffer a jump before landing
+    /**
+     * Fraction of walking speed shed at full reach. The hand slows as it
+     * commits to a grab, which is what buys the reach enough time to read
+     * without widening the trigger radius.
+     *
+     * This is a GAMEPLAY change, not just an animation one: stopping to take an
+     * emeem now costs you ground on the Protector, so a greedy grab in front of
+     * him is a real decision rather than a free one.
+     */
+    reachSlowdown: 0.38,
     turnLerp: 14,          // how fast the hand swings to face travel direction
     spawnHeight: 2.0,
     // Claw animation. The open is a slow deliberate reach; the snap is fast,
     // because a grab that closes as slowly as it opens reads as a yawn.
-    // At 7.0 the claw lagged: closing 4.2m -> 1.25m takes only ~0.4s at running
-    // speed, so the pickup fired while the reach was still around 0.85 and the
-    // full pincer-down pose never actually appeared in play. 13 gets there.
-    reachOpenRate: 13.0,   // how fast the claw spreads as an emeem nears
+    // Measured across eight real catches, the reach lasted 183ms to 1900ms
+    // (mean 667). The short ones read as a twitch rather than a reach. Eased
+    // from 13 to 7 so the pose comes in deliberately; the time to complete it
+    // comes from reachSlowdown below, not from a wider trigger radius, because
+    // widening the radius would leave the hand permanently lifted and the
+    // five-finger walk would never be seen.
+    reachOpenRate: 7.0,    // how fast the claw spreads as an emeem nears
     pinchSnapRate: 34.0,   // how fast it slams shut on the catch
     pinchHoldTime: 0.11,   // seconds the claw stays clamped after a catch
     // Height of the pincer above the feet once the hand has lifted. The grab
@@ -96,7 +109,7 @@ export const CONFIG = {
     // The claw starts opening this far out, so the hand visibly reaches for an
     // emeem before it takes it. Must be comfortably wider than magnetRadius or
     // the anticipation has no room to play before the pickup fires.
-    reachRadius: 4.2,
+    reachRadius: 5.2,
   },
 
   // --------------------------------------------------------------- monster

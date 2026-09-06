@@ -108,7 +108,7 @@ const YAW_AMP = 0.045;      // body yaw wag with the gait
 const CLAW_BOB = 0.030;     // claw bounce with each footfall
 const CLAW_SWING = 0.045;   // claw reach oscillation over the stride
 const IDLE_BOB = 0.012;     // slow claw breathing when standing still
-const REACH_LERP = 9.0;     // how fast the body drops into the reaching pose
+const REACH_LERP = 5.5;     // how fast the body eases into the reaching pose
 // Rears back as it lifts, so the pincer is presented forward and up rather than
 // buried under the palm.
 const REACH_PITCH = 0.30;
