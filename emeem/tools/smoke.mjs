@@ -146,11 +146,20 @@ await page.evaluate(() => {
   const g = window.__EMEEM__;
   for (let i = 0; i < 40; i++) g.ctx.addScore(1); // force the tier ladder
 });
-await sleep(1200);
-const escalated = await page.evaluate(() => {
+// Poll for the eased values to arrive rather than sleeping a fixed wall-clock
+// time. Under software rasterisation the game runs at ~6fps and CONFIG.render
+// .maxDelta clamps every frame to 0.05s, so a 1.2s sleep advances barely 0.35s
+// of GAME time and the monster's speed ease has hardly started. Sleeping longer
+// would work on this machine and break on a faster or slower one; waiting for
+// convergence tests the behaviour instead of the frame rate.
+const escalated = await page.waitForFunction(() => {
+  const s = window.__EMEEM__.state;
+  if (s.monster.speed <= 6 || s.dread <= 0.3) return false;
+  return { level: s.level.name, idx: s.levelIndex, speed: s.monster.speed, dread: s.dread, scale: s.monster.scale };
+}, null, { timeout: 40000 }).then((h) => h.jsonValue()).catch(async () => page.evaluate(() => {
   const s = window.__EMEEM__.state;
   return { level: s.level.name, idx: s.levelIndex, speed: s.monster.speed, dread: s.dread, scale: s.monster.scale };
-});
+}));
 check('threat level escalates with score', escalated.idx >= 4, `${escalated.level} (tier ${escalated.idx})`);
 check('monster speeds up with the tier', escalated.speed > 6, `${escalated.speed.toFixed(2)} m/s`);
 check('dread rises', escalated.dread > 0.3, escalated.dread.toFixed(2));

@@ -29,7 +29,16 @@ const _sunOffset = new THREE.Vector3();
 const _sunAnchor = new THREE.Vector3();
 
 /** Direction from the shadow-casting anchor back to the sun, in world space. */
-const SUN_DIR = new THREE.Vector3(14, 30, -18).normalize();
+/**
+ * Sun direction. It sits BEHIND and above the camera, not in front of it.
+ *
+ * At (14, 30, -18) the sun was past the scene on -Z while the fixed camera
+ * looks down -Z from +Z, so every surface turned toward the player was
+ * backlit and read as a black silhouette. Moving it to +Z lights the faces
+ * you actually see; the off-axis x keeps enough raking shadow for the boxes
+ * to have form rather than looking flat.
+ */
+const SUN_DIR = new THREE.Vector3(-16, 30, 22).normalize();
 /** How far up the sun sits. Must stay well inside the shadow camera's far plane. */
 const SUN_DISTANCE = 42;
 /** Half-width of the sun's orthographic shadow box: a ~40 unit cube of coverage. */
@@ -199,14 +208,23 @@ export function createRenderer(canvasEl) {
     lastDread = d;
 
     if (scene.background && scene.background.isColor) {
-      scene.background.copy(skyCalmC).lerp(skyDreadC, d);
+      // The sky is lerped on a curve, not linearly. Ground and obstacles carry
+      // their own dread tint AND lose light to the dimming sun, so they darken
+      // roughly quadratically while a linear sky stays stubbornly blue - at
+      // mid-dread the world had gone blood-red under a cheerful afternoon.
+      scene.background.copy(skyCalmC).lerp(skyDreadC, Math.pow(d, 0.68));
     }
     if (scene.fog) {
       scene.fog.color.copy(fogCalmC).lerp(fogDreadC, d);
       // Squeeze the fog band as dread rises: the far plane closes faster than
       // the near one, so visibility collapses rather than just greying out.
+      // Visibility floor. At 0.34 the far plane closed to ~51m, and at the top
+      // tiers the monster moves at 9.2 m/s through a world that is 22 obstacles
+      // per chunk thick - about five seconds of warning, most of it spent
+      // unable to see what you are about to run into. Atmospheric, unplayable.
+      // 0.50 still collapses the world around you without blinding you in it.
       scene.fog.near = lerp(CONFIG.world.fogNear, CONFIG.world.fogNear * 0.42, d);
-      scene.fog.far = lerp(CONFIG.world.fogFar, CONFIG.world.fogFar * 0.34, d);
+      scene.fog.far = lerp(CONFIG.world.fogFar, CONFIG.world.fogFar * 0.50, d);
     }
 
     sun.color.copy(sunCalmC).lerp(sunDreadC, d);

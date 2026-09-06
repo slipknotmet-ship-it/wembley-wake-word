@@ -102,13 +102,17 @@ function frame(now) {
       monster.fixedUpdate(FIXED, ctx);
       acc -= FIXED;
     }
+    // engine.update() FIRST: it owns the smoothing of state.dread, and both the
+    // world and the emeems tint themselves from that value. Updating them ahead
+    // of it left their colours trailing the sky and fog by one frame.
+    engine.update(dt, ctx);
     ctx.world.update(dt, ctx);
     emeems.update(dt, ctx);
   }
 
   player.update(dt, ctx);
   monster.update(dt, ctx);
-  engine.update(dt, ctx);
+  if (state.phase !== 'playing') engine.update(dt, ctx);
   hud.update(dt, ctx);
   ctx.audio.update(dt, ctx);
 

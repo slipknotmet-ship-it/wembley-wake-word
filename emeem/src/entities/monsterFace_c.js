@@ -54,9 +54,10 @@ import { CONFIG as DEFAULT_CONFIG } from '../core/config.js';
  *      the arms flare off the ribs, the lower belly juts like a jaw;
  *   6. only then the flush, the lens glow and the wet red of the maw.
  *
- * BUDGET: 27 meshes, 20 geometries, 4 materials, ~4.5k triangles. Every scratch
- * object is at module scope; update() allocates nothing and only SETS
- * transforms, so a ten minute chase cannot drift the pose by a millimetre.
+ * BUDGET: 27 meshes over 21 shared geometries and 4 materials, ~8.5k triangles,
+ * and no per-frame buffer traffic at all. update() allocates nothing and only
+ * SETS transforms - two rigs fed the same input for 40,000 frames come out
+ * bit-identical, so a ten minute chase cannot drift the pose by a millimetre.
  */
 
 // Module alias so buildFace can default its THREE argument while still letting
@@ -88,7 +89,6 @@ const damp = (cur, tgt, rate, dt) => lerp(cur, tgt, 1 - Math.exp(-rate * dt));
 // =========================================================================
 class Buf {
   constructor() { this.p = []; this.c = []; this.i = []; }
-  get n() { return this.p.length / 3; }
   v(x, y, z, col) {
     this.p.push(x, y, z);
     this.c.push(col[0], col[1], col[2]);
@@ -284,8 +284,8 @@ const HEIGHT = 3.40;
 
 const HIP_Y = 1.55;          // torso pivot: the hunch has to happen at the hips
 const BROW_Y = 2.74;         // sunglasses centre-line   (the EYES)
-const NAVEL_Y = 2.12;        // navel                    (the NOSE)
-const MOUTH_Y = 1.90;        // belly fold               (the MOUTH)
+const NAVEL_Y = 2.18;        // navel                    (the NOSE)
+const MOUTH_Y = 1.87;        // belly fold               (the MOUTH)
 const MOUTH_Z = -0.60;       // sunk 3cm inside the gut surface
 const BELLY_PIVOT_Y = 2.34;  // the gut swings about the base of the ribs
 const CHIN_PIVOT_Y = 1.98;   // the lower roll swings about the top of itself
@@ -649,14 +649,14 @@ export function buildFace(THREE = THREE_NS, CONFIG = DEFAULT_CONFIG) {
   const noseBuf = (() => {
     const B = new Buf();
     const rings = [
-      { y: 2.44, rx: 0.045, rz: 0.020, zc: -0.545, n: 2.4 },
-      { y: 2.36, rx: 0.070, rz: 0.032, zc: -0.575, n: 2.4 },
-      { y: 2.28, rx: 0.092, rz: 0.045, zc: -0.600, n: 2.6 },
-      { y: 2.21, rx: 0.118, rz: 0.058, zc: -0.615, n: 2.8 },
-      { y: 2.14, rx: 0.150, rz: 0.072, zc: -0.622, n: 3.0 },
-      { y: 2.07, rx: 0.145, rz: 0.068, zc: -0.620, n: 3.0 },
-      { y: 2.01, rx: 0.105, rz: 0.048, zc: -0.610, n: 2.8 },
-      { y: 1.96, rx: 0.055, rz: 0.024, zc: -0.595, n: 2.4 },
+      { y: 2.50, rx: 0.045, rz: 0.020, zc: -0.540, n: 2.4 },
+      { y: 2.42, rx: 0.070, rz: 0.032, zc: -0.570, n: 2.4 },
+      { y: 2.34, rx: 0.092, rz: 0.045, zc: -0.596, n: 2.6 },
+      { y: 2.27, rx: 0.118, rz: 0.058, zc: -0.612, n: 2.8 },
+      { y: 2.20, rx: 0.150, rz: 0.072, zc: -0.620, n: 3.0 },
+      { y: 2.13, rx: 0.145, rz: 0.068, zc: -0.618, n: 3.0 },
+      { y: 2.07, rx: 0.105, rz: 0.048, zc: -0.608, n: 2.8 },
+      { y: 2.02, rx: 0.055, rz: 0.024, zc: -0.593, n: 2.4 },
     ];
     // Rings are written at their rig-space heights and depths, then shifted
     // into the nose group's own frame (origin at the navel, z = -0.62).
@@ -673,10 +673,10 @@ export function buildFace(THREE = THREE_NS, CONFIG = DEFAULT_CONFIG) {
     // The navel slot: a dark almond standing 1cm proud of the ridge tip. Being
     // proud rather than sunk is deliberate - at 40m a black shape reads as a
     // hole whatever its actual depth, and a real hole would be invisible.
-    addEllipsoid(B, 0, 2.125 - NAVEL_Y, -0.686 + 0.62, 0.042, 0.080, 0.030, 10, 6,
+    addEllipsoid(B, 0, 2.185 - NAVEL_Y, -0.684 + 0.62, 0.042, 0.080, 0.030, 10, 6,
       (nx, ny) => mixTone(DEEP, MAW_D, clamp01(0.4 + 0.5 * ny)));
     // The hooded fold above it.
-    addEllipsoid(B, 0, 2.205 - NAVEL_Y, -0.672 + 0.62, 0.105, 0.030, 0.028, 10, 6, tone(CREASE, 1.15));
+    addEllipsoid(B, 0, 2.265 - NAVEL_Y, -0.670 + 0.62, 0.105, 0.030, 0.028, 10, 6, tone(CREASE, 1.15));
     return B;
   })();
 
@@ -699,19 +699,19 @@ export function buildFace(THREE = THREE_NS, CONFIG = DEFAULT_CONFIG) {
     // rather than lofted up Y. Cheap, and the joins disappear once the normals
     // are averaged.
     for (const s of [-1, 1]) {
-      const N = 4;
+      const N = 5;
       for (let i = 0; i <= N; i++) {
         const t = i / N;                       // 0 = outer end, 1 = inner end
-        const x = s * lerp(0.780, 0.055, t);
-        const y = lerp(0.075, -0.070, t);      // inner end drops: the scowl
-        const r = 0.052 + 0.055 * Math.sin(Math.PI * clamp01(t * 0.92 + 0.04));
-        addEllipsoid(B, x, y, 0, 0.090, r, r * 1.15, 8, 5,
+        const x = s * lerp(0.700, 0.050, t);
+        const y = lerp(0.060, -0.062, t);      // inner end drops: the scowl
+        const r = 0.040 + 0.042 * Math.sin(Math.PI * clamp01(t * 0.92 + 0.04));
+        addEllipsoid(B, x, y, 0, 0.118, r, r * 1.25, 8, 5,
           (nx, ny) => mixTone(SKIN_HI, CREASE, clamp01(0.18 + 0.60 * clamp01(-ny))));
       }
     }
     // Corrugator furrows: two short vertical welts between the lenses.
     for (const s of [-1, 1]) {
-      addEllipsoid(B, s * 0.052, -0.115, 0.010, 0.032, 0.115, 0.048, 7, 5,
+      addEllipsoid(B, s * 0.050, -0.130, 0.012, 0.030, 0.100, 0.044, 7, 5,
         (nx, ny) => mixTone(SKIN, CREASE, clamp01(0.34 + 0.34 * Math.abs(nx))));
     }
     return B;
@@ -814,9 +814,9 @@ export function buildFace(THREE = THREE_NS, CONFIG = DEFAULT_CONFIG) {
   const mawBuf = (() => {
     const B = new Buf();
     addLipBar(B, {
-      hw: M_HW * 0.96, arc: M_ARC, bow: M_BOW * 1.15, ry: 0.150, rz: 0.150,
+      hw: M_HW * 0.88, arc: M_ARC, bow: M_BOW * 1.15, ry: 0.150, rz: 0.135,
       samples: 13, sides: 10, n: 2.4,
-      taper: (u) => Math.pow(1 - 0.92 * u * u, 0.75),
+      taper: (u) => Math.pow(1 - 0.88 * u * u, 0.55),
       col: (u, up, front) => mixTone(MAW_R, MAW_D,
         clamp01(0.35 + 0.55 * clamp01(-front) + 0.25 * Math.abs(up))),
     });
@@ -883,11 +883,14 @@ export function buildFace(THREE = THREE_NS, CONFIG = DEFAULT_CONFIG) {
   })();
   glassesGroup.add(bridgeMesh);
 
+  // The ridge belongs to the CHEST, not to the glasses: parented to the frames
+  // it would be dragged down over the lenses every time the visor drops, and
+  // eyes are the one thing a face cannot afford to lose.
   const browBarGroup = new T.Group();
-  browBarGroup.position.set(0, FRAME_HH + 0.055, -0.40);
+  browBarGroup.position.set(0, BROW_Y - HIP_Y + FRAME_HH + 0.185, -0.40);
   const browBarMesh = meshOf(browBarBuf, matSkin, 'browRidge');
   browBarGroup.add(browBarMesh);
-  glassesGroup.add(browBarGroup);
+  torsoGroup.add(browBarGroup);
 
   // ---- nose ----
   const noseGroup = new T.Group();
@@ -898,7 +901,7 @@ export function buildFace(THREE = THREE_NS, CONFIG = DEFAULT_CONFIG) {
   const nostrils = [];
   for (const side of [-1, 1]) {
     const m = meshOf(nostrilBuf, matSkin, 'nostril');
-    m.position.set(side * 0.118, 2.055 - BELLY_PIVOT_Y, -0.688);
+    m.position.set(side * 0.118, 2.115 - BELLY_PIVOT_Y, -0.688);
     bellyGroup.add(m);
     nostrils.push(m);
   }
@@ -977,14 +980,14 @@ export function buildFace(THREE = THREE_NS, CONFIG = DEFAULT_CONFIG) {
     // One scale does the work of a whole morph target: sy deepens the parabola
     // AND thickens the lips, sx widens the mouth, sz pushes them off the belly.
     const sx = 1 + 0.24 * aFast;
-    const sy = 1 + 1.00 * a + 0.20 * m;
+    const sy = 1 + 0.90 * a + 0.18 * m;
     const sz = 1 + 0.46 * a + 0.30 * m;
     upperLip.scale.set(sx, sy, sz);
     lowerLip.scale.set(sx, sy, sz);
 
     // Lip separation. The lips stay welded shut through the whole anger ramp -
     // the frown is a closed, clenched thing - and only mouthOpen parts them.
-    const gap = 0.008 + 0.030 * a + 0.020 * prox * pant + 0.300 * m;
+    const gap = 0.008 + 0.030 * a + 0.020 * prox * pant + 0.245 * m;
     const upY = LIP_U_RY * sy + gap * 0.34;
     const loY = LIP_L_RY * sy + gap * 0.66;
     upperLip.position.set(0, upY, 0);
@@ -1004,7 +1007,7 @@ export function buildFace(THREE = THREE_NS, CONFIG = DEFAULT_CONFIG) {
     // reading as a flat black sticker on the belly.
     const open = 0.16 + 1.95 * m + 0.25 * a;
     mawMesh.scale.set(sx * 0.99, open, 1 + 0.55 * m);
-    mawMesh.position.set(0, (upY - loY) * 0.5 - 0.02 * m, 0.150 + 0.03 * m);
+    mawMesh.position.set(0, (upY - loY) * 0.5 - 0.02 * m, 0.115 + 0.03 * m);
 
     // Corner hooks: re-pinned to wherever the scaled curve now ends, then swung
     // down and OUT until their tips clear the flank. This is the cue that reads
@@ -1031,17 +1034,28 @@ export function buildFace(THREE = THREE_NS, CONFIG = DEFAULT_CONFIG) {
     for (let i = 0; i < 2; i++) {
       const s = i === 0 ? -1 : 1;
       const g = brows[i];
-      // Hinged about the OUTER corner so the inner ends drop: the brow cue.
-      g.rotation.z = -s * (0.06 + 0.34 * aFast);
+      // Hinged about its OUTER corner. Rotating a group whose lens sits at
+      // local +x by a POSITIVE angle lifts that lens, so the sign has to follow
+      // the side: s = -1 (screen left, lens inboard at +x) needs a negative
+      // rotation to drop its inner end. Get this backwards and you build a
+      // surprised face.
+      g.rotation.z = s * (0.02 + 0.24 * aFast);
       // ...and the pair closes towards the sternum as the brow knits.
-      g.position.set(s * (BROW_PIVOT_X - 0.055 * a), 0, BROW_PIVOT_Z - 0.012 * a);
+      g.position.set(s * (BROW_PIVOT_X - 0.040 * a), 0, BROW_PIVOT_Z - 0.012 * a);
       g.scale.set(1, 1 + 0.20 * a, 1);
     }
     bridgeMesh.position.y = -0.020 * a;
     // The ridge is buried in the chest at rest and pushes physically out of it.
-    browBarGroup.position.set(0, FRAME_HH + 0.055 - 0.075 * a, lerp(0.10, -0.545, aFast));
-    browBarGroup.scale.set(1 + 0.10 * a, 0.55 + 0.75 * a, 1);
-    browBarGroup.rotation.x = -0.30 * a;
+    // Sits clear above the frames and travels only in z: buried in the chest at
+    // rest, standing 12cm proud of it - and overhanging the glasses - at full
+    // rage. Dropping it onto the lenses instead would just eat the eyes.
+    // Buried in the chest at rest, standing proud of it and overhanging the
+    // glasses at full rage. It only travels in z; dropping it in y would just
+    // eat the lenses.
+    browBarGroup.position.set(0, BROW_Y - HIP_Y + FRAME_HH + 0.185 - 0.030 * a,
+      lerp(0.12, -0.480, aFast));
+    browBarGroup.scale.set(1, 0.50 + 0.60 * a, 1);
+    browBarGroup.rotation.x = -0.20 * a;
 
     // ----------------------------------------------------------- the nose --
     noseGroup.scale.set(1 + 0.22 * a, 1 + 0.10 * a, 1 + 0.85 * a);
@@ -1049,7 +1063,7 @@ export function buildFace(THREE = THREE_NS, CONFIG = DEFAULT_CONFIG) {
     for (let i = 0; i < 2; i++) {
       const s = i === 0 ? -1 : 1;
       const n = nostrils[i];
-      n.position.set(s * (0.118 + 0.055 * a), 2.055 - BELLY_PIVOT_Y - 0.018 * a, -0.688 - 0.055 * a);
+      n.position.set(s * (0.118 + 0.055 * a), 2.115 - BELLY_PIVOT_Y - 0.018 * a, -0.688 - 0.055 * a);
       n.rotation.z = -s * 0.55 * a;
       n.scale.setScalar(1 + 0.55 * a + 0.10 * m);
     }
@@ -1084,7 +1098,11 @@ export function buildFace(THREE = THREE_NS, CONFIG = DEFAULT_CONFIG) {
     // the foot is furthest forward, and a rig with no ankle joint then ploughs
     // it through the ground.
     const lift = Math.max(0, Math.cos(gait));
-    const swAmp = 0.32 * Math.min(1, speedS / 5.2) + 0.05;
+    // Purely speed-driven, with no floor: a floor would leave the legs frozen
+    // at whatever phase they stopped on. Standing still gets its own slow sway
+    // off the clock instead, which keeps ticking when the gait does not.
+    const swAmp = 0.32 * Math.min(1, speedS / 5.2);
+    const still = 1 - Math.min(1, speedS / 3);
     // Crouch: thigh forward, knee flexed by the SAME angle, which leaves the
     // shin (and therefore the foot) vertical. Any mismatch here drives the toes
     // through the ground, and this rig has no foot IK to catch it.
@@ -1105,8 +1123,13 @@ export function buildFace(THREE = THREE_NS, CONFIG = DEFAULT_CONFIG) {
     const drop = THIGH * (1 - Math.cos(crouch));
     const bob = -0.040 * (0.5 - 0.5 * Math.cos(gait * 2)) * Math.min(1, speedS / 4.5);
     root.position.set(0, bob - drop, 0);
-    // A heavy waddle: this thing is 3.4 metres of belly and it should roll.
-    root.rotation.set(0, 0.035 * sw, 0.055 * sw * Math.min(1, speedS / 5));
+    // A heavy waddle: this thing is 3.4 metres of belly and it should roll. At
+    // a standstill that becomes a slow shift of weight, so it never looks dead.
+    root.rotation.set(
+      0,
+      0.035 * sw + 0.011 * still * Math.sin(clock * 0.61),
+      0.055 * sw * Math.min(1, speedS / 5) + 0.012 * still * Math.sin(clock * 0.83),
+    );
 
     // ----------------------------------------------------------- colour ----
     // Flush last, because colour is the first thing the fog takes.
@@ -1133,7 +1156,10 @@ export function buildFace(THREE = THREE_NS, CONFIG = DEFAULT_CONFIG) {
     const o = opts || EMPTY_OPTS;
     const d = clamp(typeof dt === 'number' && isFinite(dt) ? dt : 0, 0, 0.05);
     warm = true;
-    clock += d;
+    // The caller's clock wins when it supplies one, so idle motion is
+    // reproducible frame for frame in a replay or a screenshot rig.
+    if (typeof o.time === 'number' && isFinite(o.time)) clock = o.time;
+    else clock += d;
 
     if (typeof o.anger === 'number' && isFinite(o.anger)) angerT = clamp01(o.anger);
     if (typeof o.mouth === 'number' && isFinite(o.mouth)) mouthT = clamp01(o.mouth);

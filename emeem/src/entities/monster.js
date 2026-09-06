@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { buildFace } from './monsterFace.js';
 import { CONFIG } from '../core/config.js';
 
 /**
@@ -129,18 +130,9 @@ const SPEED_LERP = 1.6;
 const SCALE_LERP = 2.2;
 
 // --------------------------------------------------------------- animation
-
-/** Metres of ground covered per stride at scale 1. Sets the gait frequency. */
-const STRIDE_LENGTH = 2.3;
-/** Strides per second while standing still, so it never freezes mid-pose. */
-const IDLE_STRIDE_RATE = 0.32;
-const BOB_HEIGHT = 0.14;
-const LEAN_BASE = 0.10;
-const LEAN_DREAD = 0.30;
-const JAW_BASE = 0.05;
-const JAW_DREAD = 0.32;
-const EYE_EMISSIVE_MIN = 1.1;
-const EYE_EMISSIVE_MAX = 4.2;
+// Stride length, bob, lean, jaw and eye-glow tunables all moved into
+// entities/monsterFace.js when the creature's body did. This file no longer
+// knows anything about what the Protector looks like - only where it is going.
 
 /** Bone white for teeth. Not a tunable in config.js - it is not something the
  *  dread ramp touches, it just has to be the lightest thing on the model so
@@ -255,268 +247,6 @@ function clearanceAlong(ox, oz, dx, dz, maxT, r, floorY, list) {
   return best;
 }
 
-/**
- * Builds the rig. Deliberately more suggested than detailed: at forty metres
- * through fog you get a hunched mass, a ragged spine, two red coals and a jaw.
- * Everything below is sized in metres at scale 1 with the feet on y = 0 and
- * the model facing -Z.
- */
-function buildRig() {
-  const P = CONFIG.palette;
-
-  // Deterministic raggedness - the spine must look the same every run.
-  let seed = 0x9e3779b9;
-  const rnd = () => {
-    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
-    return seed / 4294967296;
-  };
-
-  // --------------------------------------------------------- shared assets
-  // One faceted blob geometry does the torso, hump, skull, jaw, fists and feet;
-  // one tapered cylinder does every limb segment. Flat shading turns cheap
-  // low-poly primitives into something that reads as carved rock.
-  const geoBlob = new THREE.IcosahedronGeometry(1, 1);
-  const geoLimb = new THREE.CylinderGeometry(0.5, 0.38, 1, 6);
-  const geoSpike = new THREE.ConeGeometry(0.5, 1, 4);
-  const geoEye = new THREE.SphereGeometry(1, 10, 8);
-
-  const matBody = new THREE.MeshStandardMaterial({
-    color: P.monster, roughness: 0.95, metalness: 0.02, flatShading: true,
-  });
-  const matLimb = new THREE.MeshStandardMaterial({
-    color: P.monster, roughness: 1.0, metalness: 0.0, flatShading: true,
-  });
-  matLimb.color.multiplyScalar(0.78); // limbs read darker than the mass
-  const matSpike = new THREE.MeshStandardMaterial({
-    color: P.monster, roughness: 0.85, metalness: 0.05, flatShading: true,
-  });
-  matSpike.color.multiplyScalar(1.35); // spikes catch the sun so the ridge reads
-  const matTooth = new THREE.MeshStandardMaterial({
-    color: TOOTH_COLOR, roughness: 0.55, metalness: 0.0, flatShading: true,
-  });
-  const matMaw = new THREE.MeshStandardMaterial({
-    color: MAW_COLOR, emissive: P.monsterEye, emissiveIntensity: 0.35, roughness: 1.0,
-  });
-  const matEye = new THREE.MeshStandardMaterial({
-    color: P.monsterEye, emissive: P.monsterEye,
-    emissiveIntensity: EYE_EMISSIVE_MIN, roughness: 0.3, metalness: 0.0,
-  });
-  // Additive halo, fog-exempt so the eyes stay two hot points no matter how
-  // thick the dread fog gets. This is the single most legible thing about the
-  // monster at distance.
-  const matEyeGlow = new THREE.MeshBasicMaterial({
-    color: P.monsterEye, transparent: true, opacity: 0.3, depthWrite: false,
-    blending: THREE.AdditiveBlending, fog: false,
-  });
-
-  const shadows = !!CONFIG.render.shadows;
-
-  /** Positioned, non-uniformly scaled blob. */
-  const blob = (mat, sx, sy, sz, x, y, z) => {
-    const m = new THREE.Mesh(geoBlob, mat);
-    m.scale.set(sx, sy, sz);
-    m.position.set(x, y, z);
-    m.castShadow = shadows;
-    return m;
-  };
-  /** Limb segment hanging down from its parent's origin. */
-  const limb = (radius, length) => {
-    const m = new THREE.Mesh(geoLimb, matLimb);
-    m.scale.set(radius * 2, length, radius * 2);
-    m.position.y = -length * 0.5;
-    m.castShadow = shadows;
-    return m;
-  };
-
-  const group = new THREE.Group();
-  group.name = 'monster';
-
-  // rig carries the lurch (bob in Y, roll in Z) for the whole body including
-  // the legs. Keeping it separate from `group` means state.monster.pos stays
-  // the authoritative ground truth and the animation never feeds back into the
-  // physics.
-  const rig = new THREE.Group();
-  group.add(rig);
-
-  // trunk is everything above the hips, and it is a separate pivot for one
-  // reason: the forward lean has to happen at the HIPS. Leaning the whole model
-  // about its feet tips the leading foot underground - a couple of centimetres
-  // at rest, a third of a metre by the time it is at full dread and full size.
-  const TRUNK_Y = 1.60;
-  const trunk = new THREE.Group();
-  trunk.position.y = TRUNK_Y;
-  rig.add(trunk);
-
-  // ------------------------------------------------------------------ mass
-  trunk.add(blob(matBody, 1.10, 0.92, 1.20, 0, 0.60, 0));    // barrel chest
-  trunk.add(blob(matBody, 1.00, 0.60, 0.80, 0, 1.12, 0.34)); // hunched hump
-  trunk.add(blob(matBody, 0.80, 0.62, 0.72, 0, 0.02, 0.10)); // gut / hips
-
-  // ------------------------------------------------------------------ head
-  const head = new THREE.Group();
-  head.position.set(0, 1.02, -0.72);
-  trunk.add(head);
-  head.add(blob(matBody, 0.60, 0.50, 0.75, 0, 0, -0.10));    // skull
-  head.add(blob(matBody, 0.66, 0.17, 0.34, 0, 0.30, -0.42)); // brow ridge
-  // Throat, sitting BEHIND the teeth rather than filling the whole mouth: it
-  // only has to be the black you see past the fangs when the jaw drops.
-  head.add(blob(matMaw, 0.38, 0.20, 0.30, 0, -0.12, -0.30));
-
-  // Eyes sit just PROUD of the skull. The skull is an ellipsoid of radii
-  // (0.60, 0.50, 0.75) centred at z = -0.10, so its surface out at x = 0.26 is
-  // near z = -0.76: an eye centred any shallower than about -0.70 is simply
-  // buried inside the head and never renders at all.
-  const eyeL = new THREE.Mesh(geoEye, matEye);
-  eyeL.scale.setScalar(0.115);
-  eyeL.position.set(-0.26, 0.10, -0.70);
-  const eyeR = eyeL.clone();
-  eyeR.position.x = 0.26;
-  head.add(eyeL, eyeR);
-
-  const glowL = new THREE.Mesh(geoEye, matEyeGlow);
-  glowL.scale.setScalar(0.28);
-  glowL.position.copy(eyeL.position);
-  const glowR = glowL.clone();
-  glowR.position.x = 0.26;
-  head.add(glowL, glowR);
-
-  // Jaw pivots at the back of the mouth. The model faces -Z, so a NEGATIVE
-  // rotation about X drops the chin: R_x(t) maps the front of the jaw (0,0,-1)
-  // to (0, sin t, -cos t), which rises for positive t.
-  const jaw = new THREE.Group();
-  jaw.position.set(0, -0.20, -0.02);
-  head.add(jaw);
-  jaw.add(blob(matBody, 0.50, 0.20, 0.60, 0, -0.04, -0.44));
-
-  // ----------------------------------------------------------------- teeth
-  // Two instanced rows around the mouth OPENING - three a side, converging
-  // toward the snout. Individually invisible at range; collectively they are
-  // the pale line that tells you the mouth is open. When the jaw is shut the
-  // upper row is swallowed by the jaw blob, so the mouth closes cleanly.
-  const TOOTH_Z = [-0.45, -0.62, -0.78];
-  const TOOTH_X = [0.24, 0.19, 0.11];
-  const TOOTH_LEN = [0.20, 0.17, 0.14];
-  const TEETH = 6;
-  const mtx = new THREE.Matrix4();
-  const quat = new THREE.Quaternion();
-  const eul = new THREE.Euler();
-  const pos = new THREE.Vector3();
-  const scl = new THREE.Vector3();
-
-  const toothRow = (parent, y, pointUp) => {
-    const inst = new THREE.InstancedMesh(geoSpike, matTooth, TEETH);
-    inst.castShadow = false;
-    for (let i = 0; i < TEETH; i++) {
-      const side = i < 3 ? -1 : 1;
-      const k = i % 3;
-      const len = TOOTH_LEN[k];
-      // The cone is centred, so half a length of lift plants its base on the
-      // gum line and points the tip into the mouth.
-      pos.set(side * TOOTH_X[k], y + (pointUp ? len * 0.5 : -len * 0.5), TOOTH_Z[k]);
-      eul.set(pointUp ? 0 : Math.PI, 0, side * 0.08);
-      quat.setFromEuler(eul);
-      scl.set(0.17, len, 0.17);
-      mtx.compose(pos, quat, scl);
-      inst.setMatrixAt(i, mtx);
-    }
-    inst.instanceMatrix.needsUpdate = true;
-    inst.computeBoundingSphere();
-    parent.add(inst);
-    return inst;
-  };
-  toothRow(head, -0.20, false); // upper fangs, hanging from the lip line
-  toothRow(jaw, 0.02, true);    // lower fangs, standing up out of the jaw
-
-  // ---------------------------------------------------------------- spikes
-  // Ragged dorsal ridge, largest at the shoulders and shrinking down the back.
-  // This is the silhouette cue that survives fog: a lumpy outline is scenery,
-  // a spined outline is a predator.
-  const SPIKES = 10;
-  const spikeMesh = new THREE.InstancedMesh(geoSpike, matSpike, SPIKES);
-  spikeMesh.castShadow = shadows;
-  trunk.add(spikeMesh);
-
-  // Per-spike rest pose. Kept so the ridge can bristle with dread by rebuilding
-  // its ten matrices - scaling the mesh or its parent in Y would drag every
-  // spike's POSITION up with its length and float the ridge off the back.
-  const spikeBase = new Float32Array(SPIKES * 6); // x, baseY, z, width, height, tiltX
-  const spikeRoll = new Float32Array(SPIKES);
-  for (let i = 0; i < SPIKES; i++) {
-    const t = i / (SPIKES - 1);
-    const o = i * 6;
-    spikeBase[o] = (rnd() - 0.5) * 0.22;
-    spikeBase[o + 1] = lerp(1.40, 0.35, t);              // where it leaves the back
-    spikeBase[o + 2] = lerp(-0.20, 1.20, t);             // nape -> tail
-    spikeBase[o + 3] = 0.30 + rnd() * 0.12;              // width
-    spikeBase[o + 4] = 0.85 * (1 - 0.5 * t) * (0.7 + rnd() * 0.65);
-    // Cones point +Y; rotating about +X tips them toward +Z, i.e. swept back.
-    spikeBase[o + 5] = 0.30 + 0.55 * t + (rnd() - 0.5) * 0.2;
-    spikeRoll[i] = (rnd() - 0.5) * 0.5;
-  }
-
-  /** Rewrites the ridge at a given bristle factor. Ten matrices; only called
-   *  when dread actually moves, which is a handful of times per run. */
-  const setBristle = (bristle) => {
-    for (let i = 0; i < SPIKES; i++) {
-      const o = i * 6;
-      const h = spikeBase[o + 4] * bristle;
-      eul.set(spikeBase[o + 5], 0, spikeRoll[i]);
-      quat.setFromEuler(eul);
-      // The cone geometry is centred, so lift it by half its length to keep the
-      // base pinned to the spine however long it grows.
-      pos.set(spikeBase[o], spikeBase[o + 1] + h * 0.5, spikeBase[o + 2]);
-      scl.set(spikeBase[o + 3], h, spikeBase[o + 3]);
-      mtx.compose(pos, quat, scl);
-      spikeMesh.setMatrixAt(i, mtx);
-    }
-    spikeMesh.instanceMatrix.needsUpdate = true;
-    spikeMesh.computeBoundingSphere();
-  };
-  setBristle(1);
-
-  // ------------------------------------------------------------------ arms
-  // Long and knuckle-dragging: the fists hang at 0.35m, which reads as ape
-  // rather than man and makes the forward swing enormous.
-  const makeArm = (side) => {
-    const shoulder = new THREE.Group();
-    shoulder.position.set(side * 1.02, 0.92, 0.02);
-    shoulder.add(blob(matBody, 0.42, 0.42, 0.42, 0, 0.04, 0));
-    shoulder.add(limb(0.30, 0.95));
-    const elbow = new THREE.Group();
-    elbow.position.y = -0.95;
-    elbow.add(limb(0.26, 0.90));
-    const fist = blob(matLimb, 0.34, 0.30, 0.34, 0, -0.92, -0.04);
-    elbow.add(fist);
-    shoulder.add(elbow);
-    trunk.add(shoulder);
-    return { shoulder, elbow };
-  };
-  const armL = makeArm(-1);
-  const armR = makeArm(1);
-
-  // ------------------------------------------------------------------ legs
-  const makeLeg = (side) => {
-    const hip = new THREE.Group();
-    hip.position.set(side * 0.50, 1.62, 0.05);
-    hip.add(limb(0.34, 0.78));
-    const knee = new THREE.Group();
-    knee.position.y = -0.78;
-    knee.add(limb(0.27, 0.66));
-    knee.add(blob(matLimb, 0.34, 0.17, 0.55, 0, -0.68, -0.10)); // foot
-    hip.add(knee);
-    rig.add(hip);
-    return { hip, knee };
-  };
-  const legL = makeLeg(-1);
-  const legR = makeLeg(1);
-
-  return {
-    group, body: rig, trunk, head, jaw, setBristle,
-    armL, armR, legL, legR,
-    matBody, matEye, matEyeGlow, matMaw,
-    glowL, glowR,
-  };
-}
 
 /**
  * @param {object} ctx game context - { THREE, CONFIG, state, bus, scene, ... }
@@ -528,13 +258,15 @@ export function createMonster(ctx) {
   const bus = ctx.bus;
   const M = CONFIG.monster;
 
-  const parts = buildRig();
-  const group = parts.group;
-  // `body` carries the bob and roll (legs included); `trunk` is everything
-  // above the hips and carries the forward lean. `group` itself stays a clean
-  // transform of state.monster.pos / yaw / scale.
-  const body = parts.body;
-  const trunk = parts.trunk;
+  // The body is entirely owned by entities/monsterFace.js: a walking torso whose
+  // face is made from itself - sunglasses across the chest for eyes, the navel
+  // for a nose, the belly fold as a frown that deepens as it escalates. It owns
+  // its own gait, breathing and expression; everything below is the CHASE, which
+  // knows nothing about what the creature looks like.
+  const face = buildFace(THREE, CONFIG);
+  const group = new THREE.Group();
+  group.name = 'monster';
+  group.add(face.group);
   // main.js never adds entity groups itself. ctx.scene is live at construction
   // time; ctx.world and ctx.audio are NOT, so nothing below may touch them
   // outside update()/fixedUpdate()/reset().
@@ -556,9 +288,10 @@ export function createMonster(ctx) {
   let unstickSign = 1;
   let caught = false;
   let roarTimer = M.roarInterval;
+  let roarPulse = 0;   // 1 on a roar, decays back to 0
+  let mawOpen = 0;     // eased maw aperture actually sent to the rig
 
   // ------------------------------------------------------- animation state
-  let gaitPhase = 0;
   // Gait speed, damped from the achieved velocity. state.monster.vel freezes at
   // whatever it last was the moment main.js stops stepping the physics, which
   // it does on the game-over screen - so reading vel directly leaves the thing
@@ -569,7 +302,6 @@ export function createMonster(ctx) {
   // Own clock: state.time freezes on the menu and after you are caught, but the
   // thing standing over your corpse should still breathe.
   let clock = 0;
-  let lastDreadWritten = -1;
 
   /**
    * Places the monster spawnDistance behind the player. Behind is +Z: the
@@ -878,6 +610,9 @@ export function createMonster(ctx) {
       const interval = lerp(M.roarInterval, M.roarIntervalMin, clamp01(state.dread));
       roarTimer = interval * (0.85 + Math.random() * 0.3);
       bus.emit('roar', { intensity: clamp01(0.18 + 0.82 * m.proximity) });
+      // Open the maw on the roar. update() decays it; this is the only place
+      // the chase reaches into the creature's expression.
+      roarPulse = 1;
     }
 
     // --------------------------------------------------------------- catch
@@ -911,95 +646,27 @@ export function createMonster(ctx) {
     // is smooth without a second filter - and it correctly freezes on the menu.
     group.scale.setScalar(m.scale);
 
-    // ------------------------------------------------------------ the gait
-    // Stride frequency falls out of the physics: metres per second divided by
-    // metres per stride. Big monster, long stride, slower and heavier cadence.
+    // The rig owns its own gait, breathing and expression. All the chase has to
+    // say is how fast it is moving and how angry it should look; everything
+    // from the stride cadence to the depth of the frown falls out of that.
     const moving = state.phase === 'playing' ? Math.hypot(m.vel.x, m.vel.z) : 0;
     animSpeed = damp(animSpeed, moving, 6, step);
-    const sp = animSpeed;
-    const speedNorm = clamp01(sp / Math.max(0.5, m.speed));
-    const strideRate = IDLE_STRIDE_RATE + sp / (STRIDE_LENGTH * Math.max(0.5, m.scale));
-    gaitPhase += TAU * strideRate * step;
-    if (gaitPhase > TAU) gaitPhase -= TAU * Math.floor(gaitPhase / TAU);
 
-    const swing = Math.sin(gaitPhase);
-    const swingOpp = -swing;
-    const legAmp = 0.42 + 0.20 * speedNorm;
-    const armAmp = 0.34 + 0.30 * speedNorm;
+    // Anger layers two things. Dread is the tier ladder - the baseline mood it
+    // settles into as your score climbs - and proximity is the immediate one,
+    // so it visibly loses its temper as it closes on you and calms again if you
+    // get away. Clamped, because both can be near 1 at the top tiers.
+    const anger = clamp01(dread * 0.72 + prox * 0.46);
 
-    // Legs extend down -Y; a positive rotation about X swings them toward -Z,
-    // which is forward for this model.
-    parts.legL.hip.rotation.x = swing * legAmp;
-    parts.legR.hip.rotation.x = swingOpp * legAmp;
-    // Knees bend on the recovery half of each stride so the foot clears ground.
-    parts.legL.knee.rotation.x = 0.22 + Math.max(0, -swing) * 0.85;
-    parts.legR.knee.rotation.x = 0.22 + Math.max(0, -swingOpp) * 0.85;
+    // The maw opens on a roar and again on the final lunge, and eases shut in
+    // between. Roars are punchy; the lunge is a sustained gape.
+    roarPulse = roarPulse > 0 ? Math.max(0, roarPulse - step * 1.6) : 0;
+    const lunge = prox > 0.55 ? (prox - 0.55) / 0.45 : 0;
+    mawOpen = damp(mawOpen, clamp01(Math.max(roarPulse, lunge)), 8, step);
 
-    // Arms counter-swing, then abandon the swing entirely and reach when it is
-    // nearly on top of you: a lunge you can read in your peripheral vision.
-    const reach = clamp01((prox - 0.45) / 0.4);
-    parts.armL.shoulder.rotation.x = lerp(swingOpp * armAmp, 1.25, reach);
-    parts.armR.shoulder.rotation.x = lerp(swing * armAmp, 1.25, reach);
-    parts.armL.shoulder.rotation.z = lerp(0.10, -0.28, reach);
-    parts.armR.shoulder.rotation.z = lerp(-0.10, 0.28, reach);
-    parts.armL.elbow.rotation.x = lerp(0.25 + Math.max(0, swingOpp) * 0.35, -0.75, reach);
-    parts.armR.elbow.rotation.x = lerp(0.25 + Math.max(0, swing) * 0.35, -0.75, reach);
-
-    // The hips DROP twice per stride, and the phase matters: they are highest
-    // at mid-stance, when the legs are together and vertically under the mass,
-    // and lowest when the legs are at full spread. That is both what a real
-    // heavy walk does and, with no IK anywhere in this rig, the only version
-    // that keeps the feet on the deck - a leg swung out by legAmp lifts its own
-    // foot by about leg * (1 - cos legAmp), which is what BOB_HEIGHT is sized
-    // to cancel. Bobbing UP instead would float the whole animal off the
-    // ground, a third of a metre of it once it has doubled in size.
-    const heavy = 0.3 + 0.7 * speedNorm;
-    // `body` is inside `group`, which already carries m.scale, so the bob is
-    // authored in local metres and scales with the monster for free.
-    body.position.y = -(0.5 - 0.5 * Math.cos(gaitPhase * 2)) * BOB_HEIGHT * heavy;
-    body.rotation.z = swing * 0.09 * heavy;
-    // Lean: negative X tips the trunk's up-axis toward -Z, i.e. forward over
-    // its own feet. Deeper as dread rises, so it is visibly stalking you by the
-    // end of a run.
-    trunk.rotation.x = -(LEAN_BASE + LEAN_DREAD * dread + 0.10 * speedNorm);
-
-    // --------------------------------------------------------------- head
-    // Counter-rotate so the head stays level under the lean, then let it track
-    // the player: as it banks around an obstacle the eyes stay on you.
-    parts.head.rotation.x = (LEAN_BASE + LEAN_DREAD * dread) * 0.6 + Math.sin(gaitPhase * 2 + 0.6) * 0.05;
-    const dxp = state.player.pos.x - m.pos.x;
-    const dzp = state.player.pos.z - m.pos.z;
-    if (dxp * dxp + dzp * dzp > 0.04) {
-      const off = wrapPi(dirToHeading(dxp, dzp) - m.yaw);
-      const clamped = off > 0.7 ? 0.7 : off < -0.7 ? -0.7 : off;
-      parts.head.rotation.y = damp(parts.head.rotation.y, clamped, 8, step);
-    }
-
-    // ---------------------------------------------------------------- jaw
-    // Idles slightly parted, gapes with dread, and chews the air when close.
-    const chomp = prox * 0.16 * (0.5 + 0.5 * Math.sin(clock * 9));
-    const open = JAW_BASE + JAW_DREAD * dread + 0.34 * prox + chomp;
-    parts.jaw.rotation.x = -open; // negative drops the chin, see buildRig()
-
-    // --------------------------------------------------------------- eyes
-    // Heartbeat: slow smoulder far away, hard fast pulse when it has you.
-    const pulse = 1 + 0.2 * Math.sin(clock * (3 + 9 * prox)) * (0.25 + 0.75 * prox);
-    parts.matEye.emissiveIntensity = lerp(EYE_EMISSIVE_MIN, EYE_EMISSIVE_MAX, dread) * (1 + 0.55 * prox) * pulse;
-    parts.matEyeGlow.opacity = clamp01(0.16 + 0.42 * dread + 0.34 * prox) * (0.85 + 0.15 * pulse);
-    const glowScale = 0.28 * (1 + 0.35 * dread + 0.5 * prox);
-    parts.glowL.scale.setScalar(glowScale);
-    parts.glowR.scale.setScalar(glowScale);
-
-    // Uniform uploads and instance rebuilds are the only per-frame costs worth
-    // avoiding here, so both are gated on dread actually having moved. The hide
-    // picks up a dull ember glow and the dorsal ridge bristles as the thing
-    // grows into its final form.
-    if (Math.abs(dread - lastDreadWritten) > 0.01) {
-      lastDreadWritten = dread;
-      parts.matBody.emissive.setRGB(0.16 * dread, 0.012 * dread, 0.02 * dread);
-      parts.matMaw.emissiveIntensity = 0.35 + 1.5 * dread;
-      parts.setBristle(1 + 0.30 * dread);
-    }
+    face.setAnger(anger);
+    face.setMouthOpen(mawOpen);
+    face.update(step, { anger, proximity: prox, speed: animSpeed, time: clock });
   }
 
   /** Fresh run: back behind the player, back to base speed and size. */
@@ -1022,13 +689,15 @@ export function createMonster(ctx) {
     // you something is back there before you have wandered off exploring.
     roarTimer = M.roarInterval * 0.6;
 
-    gaitPhase = 0;
     animSpeed = 0;
-    lastDreadWritten = -1;
-    body.position.set(0, 0, 0);
-    body.rotation.set(0, 0, 0);
-    trunk.rotation.set(0, 0, 0);
-    parts.head.rotation.set(0, 0, 0);
+    roarPulse = 0;
+    mawOpen = 0;
+    // Snap the creature back to its placid face; easing it down from a scowl
+    // across the start of a fresh run would look like it was still angry about
+    // the last one.
+    face.setAnger(0);
+    face.setMouthOpen(0);
+    face.update(0, { anger: 0, proximity: 0, speed: 0, time: clock });
     group.position.copy(m.pos);
     group.rotation.y = m.yaw;
     group.scale.setScalar(m.scale);
