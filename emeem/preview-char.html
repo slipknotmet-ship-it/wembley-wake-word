@@ -120,6 +120,45 @@ function nearestEmeemPos() {
   return state.player.hasNearestEmeem ? state.player.nearestEmeem.clone() : null;
 }
 
+/**
+ * Freeze-frame a row of one emeem per available tone, for reviewing the palette.
+ * Reaches into the live pool and reuses one pooled mesh per distinct material
+ * rather than building its own, so what gets photographed is exactly what the
+ * game spawns. Nothing steps afterwards, so emeem.update() cannot move them.
+ */
+function toneBoard() {
+  const meshes = [];
+  emeems.group.traverse((o) => { if (o.isMesh && o.material) meshes.push(o); });
+  const byMat = new Map();
+  for (const m of meshes) if (!byMat.has(m.material.uuid)) byMat.set(m.material.uuid, m);
+  const picked = Array.from(byMat.values());
+
+  // Everything not in the row gets parked out of shot.
+  const keep = new Set(picked);
+  for (const m of meshes) if (!keep.has(m)) m.visible = false;
+  emeems.group.traverse((o) => { if (o.isSprite) o.visible = false; });
+
+  // Clean backdrop: the world is only scenery for this shot, and obstacles kept
+  // eclipsing the emeems at the ends of the row.
+  ctx.world.group.visible = false;
+  player.object3D.visible = false;
+
+  const p = state.player.pos;
+  const gap = 1.15;
+  const x0 = p.x - ((picked.length - 1) * gap) / 2;
+  picked.forEach((m, i) => {
+    m.visible = true;
+    m.position.set(x0 + i * gap, 1.15, p.z - 5.2);
+    m.quaternion.identity();
+    m.rotation.x = -0.42;   // tip the face toward the camera
+    m.scale.setScalar(1);
+  });
+
+  camOverride = { pos: [p.x, 1.95, p.z - 0.6], look: [p.x, 1.06, p.z - 5.2], fov: 52 };
+  renderFrame();
+  return picked.length;
+}
+
 function releaseCamera() { camOverride = null; engine.camera.fov = CONFIG.camera.fov; engine.camera.updateProjectionMatrix(); }
 
 function say(t) { label.textContent = t; }
@@ -157,7 +196,7 @@ function hideEmeem() {
 
 setTier(0);
 step(60);
-window.__PREVIEW__ = { ctx, state, engine, player, emeems, step, setInput, setTier, orbit, orbitAt, nearestEmeemPos, releaseCamera, say, CONFIG, renderFrame, showEmeem, hideEmeem };
+window.__PREVIEW__ = { ctx, state, engine, player, emeems, step, setInput, setTier, orbit, orbitAt, nearestEmeemPos, toneBoard, releaseCamera, say, CONFIG, renderFrame, showEmeem, hideEmeem };
 window.__READY__ = true;
 
 let last = performance.now();

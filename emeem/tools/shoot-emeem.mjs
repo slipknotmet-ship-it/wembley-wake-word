@@ -29,7 +29,7 @@ const info = await page.evaluate(() => {
   const P = window.__PREVIEW__, s = P.state;
   P.hideEmeem(); P.releaseCamera(); P.setInput(0, 1); P.step(220);
   let live = 0; P.emeems.group.traverse(o => { if (o.isMesh && o.visible) live++; });
-  P.say(`Emeems in the field - six tones, ~80 live across the streamed world`);
+  P.say(`Emeems in the field - eight tones, ~80 live across the streamed world`);
   return { live, score: s.score, nearest: s.player.nearestEmeemDist, has: s.player.hasNearestEmeem };
 });
 console.log(`  live meshes: ${info.live}, collected while running: ${info.score}, nearest: ${info.has ? info.nearest.toFixed(2) + 'm' : 'none'}`);

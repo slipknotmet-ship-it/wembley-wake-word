@@ -130,11 +130,28 @@ export const CONFIG = {
     obstacleDread: 0x4a3340,
     sunCalm: 0xfff4d6,
     sunDread: 0xff5a3c,
-    // Emeem tones. Each one tints the whole collectible; the raised tip is the
-    // same tone darkened by emeemTipShade, baked into the mesh as vertex colour
-    // so the two-tone read costs no extra draw call.
-    emeems: [0xe0a48c, 0xd9927f, 0xc2705c, 0xa85a48, 0x8b4a3a, 0x6f3a2e],
-    emeemTipShade: 0.68,
+    /**
+     * Emeem tones, spanning the natural range from very pale pink through rose
+     * and tan to deep brown. A tone is picked at random each time an emeem
+     * spawns, so a field always shows the whole spread rather than a run of
+     * near-identical ones.
+     *
+     * Each tone tints the whole collectible; the raised tip is the same tone
+     * darkened by emeemTipShade, baked into the mesh as a vertex colour so the
+     * two-tone read costs no extra draw call. The shade is deliberately mild -
+     * at the dark end of this list a heavier one crushes the tip to black.
+     */
+    emeems: [
+      0xf2c4b3, // pale pink
+      0xe8a894, // pale rose
+      0xd98c76, // rose
+      0xc4705a, // warm tan
+      0xa85e48, // light brown
+      0x8a4835, // medium brown
+      0x6b3527, // deep brown
+      0x4a241a, // darkest brown
+    ],
+    emeemTipShade: 0.78,
     hand: 0xf6c9a8,
     handShadow: 0xd9a483,
     monster: 0x2b1220,
