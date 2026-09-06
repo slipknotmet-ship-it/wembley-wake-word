@@ -26,11 +26,18 @@ for (const file of assets) {
     if (!re.test(html)) continue;
     // The bundle is an ES module and stays one; a classic script would break
     // three.js's top-level module semantics.
-    html = html.replace(re, `<script type="module">\n${body}\n</script>`);
+    //
+    // The replacement MUST be a function. Passing the bundle as a replacement
+    // STRING lets String.replace interpret $&, $', $` and $1 inside it as
+    // special patterns - and minified three.js contains such sequences, which
+    // spliced fragments of the original HTML back into the output and left a
+    // live <script src> pointing at a file the artifact does not ship. The
+    // published page loaded, found no bundle, and showed a black screen.
+    html = html.replace(re, () => `<script type="module">\n${body}\n</script>`);
   } else if (file.endsWith('.css')) {
     const re = new RegExp(`<link[^>]*href="[^"]*${file.replace(/\./g, '\\.')}"[^>]*>`);
     if (!re.test(html)) continue;
-    html = html.replace(re, `<style>\n${body}\n</style>`);
+    html = html.replace(re, () => `<style>\n${body}\n</style>`);
   }
 }
 
