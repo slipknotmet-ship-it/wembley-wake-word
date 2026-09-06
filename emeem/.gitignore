@@ -1,0 +1,15 @@
+node_modules/
+dist/
+shots/
+*.log
+
+# Capacitor copies the built web bundle in here; it is a build output.
+android/app/src/main/assets/public/
+android/app/src/main/assets/capacitor.config.json
+android/app/src/main/assets/capacitor.plugins.json
+android/capacitor-cordova-android-plugins/
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+.DS_Store

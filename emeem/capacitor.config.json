@@ -1,0 +1,14 @@
+{
+  "appId": "com.emeem.game",
+  "appName": "Emeem",
+  "webDir": "dist",
+  "android": {
+    "allowMixedContent": false,
+    "captureInput": false,
+    "webContentsDebuggingEnabled": true,
+    "backgroundColor": "#0b0510"
+  },
+  "server": {
+    "androidScheme": "https"
+  }
+}
