@@ -130,8 +130,11 @@ export const CONFIG = {
     obstacleDread: 0x4a3340,
     sunCalm: 0xfff4d6,
     sunDread: 0xff5a3c,
-    // Emeems come in candy-button colours.
-    emeems: [0xff4d5a, 0xffb43d, 0x3ddc84, 0x4da3ff, 0xc46bff, 0xfff06b],
+    // Emeem tones. Each one tints the whole collectible; the raised tip is the
+    // same tone darkened by emeemTipShade, baked into the mesh as vertex colour
+    // so the two-tone read costs no extra draw call.
+    emeems: [0xe0a48c, 0xd9927f, 0xc2705c, 0xa85a48, 0x8b4a3a, 0x6f3a2e],
+    emeemTipShade: 0.68,
     hand: 0xf6c9a8,
     handShadow: 0xd9a483,
     monster: 0x2b1220,

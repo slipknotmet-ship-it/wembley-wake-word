@@ -29,7 +29,7 @@ const info = await page.evaluate(() => {
   const P = window.__PREVIEW__, s = P.state;
   P.hideEmeem(); P.releaseCamera(); P.setInput(0, 1); P.step(220);
   let live = 0; P.emeems.group.traverse(o => { if (o.isMesh && o.visible) live++; });
-  P.say(`Emeems in the field - ${s.score} collected so far just by running`);
+  P.say(`Emeems in the field - six tones, ~80 live across the streamed world`);
   return { live, score: s.score, nearest: s.player.nearestEmeemDist, has: s.player.hasNearestEmeem };
 });
 console.log(`  live meshes: ${info.live}, collected while running: ${info.score}, nearest: ${info.has ? info.nearest.toFixed(2) + 'm' : 'none'}`);
@@ -42,8 +42,10 @@ const near = await page.evaluate(() => {
   const e = P.nearestEmeemPos();
   if (!e) return null;
   // Eye level with the disc so its dome and thickness are both readable.
-  P.orbitAt(e.x, e.y, e.z, 1.5, 0.30, -35, 38);
-  P.say('Emeem close-up - a domed candy button, floating and slowly spinning');
+  // Three-quarters from above: the angle where the raised tip actually reads.
+  // Eye-level catches them edge-on and the tip disappears behind the base.
+  P.orbitAt(e.x, e.y, e.z, 1.25, 0.78, -35, 40);
+  P.say('Emeem close-up - a flattened circular base with a raised darker tip');
   return { x: +e.x.toFixed(2), y: +e.y.toFixed(2), z: +e.z.toFixed(2) };
 });
 console.log('  nearest emeem at', near ? JSON.stringify(near) : 'none in range');

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { CONFIG } from '../core/config.js';
 
 /**
@@ -190,6 +191,17 @@ function getGlowTexture() {
  *                         below dereferences them until update()/reset().
  * @returns {{group: THREE.Group, update: Function, reset: Function}}
  */
+/**
+ * Bakes a flat greyscale multiplier into a geometry's vertex colours, so parts
+ * merged into one buffer can still be shaded differently under one material.
+ */
+function paintVertexColor(geo, shade) {
+  const n = geo.attributes.position.count;
+  const arr = new Float32Array(n * 3);
+  arr.fill(shade);
+  geo.setAttribute('color', new THREE.BufferAttribute(arr, 3));
+}
+
 export function createEmeems(ctx) {
   const group = new THREE.Group();
   group.name = 'emeems';
@@ -199,21 +211,48 @@ export function createEmeems(ctx) {
   // mesh points at these; activating an Emeem just swaps which material it
   // references, and all six compile to the same shader program so there is no
   // recompile hitch mid-run.
-  const discGeo = new THREE.SphereGeometry(E.radius, 20, 12);
+  /**
+   * An Emeem is a flattened circular base with a small raised tip at its centre.
+   *
+   * The two parts are merged into ONE geometry and told apart by a baked vertex
+   * colour: white on the base, `emeemTipShade` grey on the tip. The material's
+   * own colour multiplies through it, so a single material and a single draw
+   * call still give a two-tone object, and all six tones share one geometry.
+   * With ~80 of these live, a second draw call each would not be free.
+   */
+  const baseGeo = new THREE.SphereGeometry(E.radius, 20, 12);
   // Bake the squash into the vertices instead of using mesh.scale, so mesh.scale
   // stays free (and uniform) for the pickup pop animation.
-  discGeo.scale(1, 0.45, 1);
+  baseGeo.scale(1, 0.30, 1);
+
+  const TIP_R = E.radius * 0.30;
+  const tipGeo = new THREE.SphereGeometry(TIP_R, 14, 10);
+  tipGeo.scale(1, 1.25, 1);
+  // Sunk slightly so the tip grows out of the base rather than balancing on it.
+  tipGeo.translate(0, E.radius * 0.30 * 0.72, 0);
+
+  paintVertexColor(baseGeo, 1);
+  paintVertexColor(tipGeo, CONFIG.palette.emeemTipShade);
+
+  const discGeo = mergeGeometries([baseGeo, tipGeo], false);
+  baseGeo.dispose();
+  tipGeo.dispose();
   discGeo.computeBoundingSphere();
 
   const glowTex = getGlowTexture();
 
-  /** Candy shell: saturated, low roughness, non-metal, and lit from within. */
+  /**
+   * Soft and matte rather than candy-glossy. A little emissive is kept purely
+   * for findability: at high dread the fog far plane closes to ~51m and a fully
+   * matte object at that range is indistinguishable from the ground.
+   */
   const discMats = COLORS.map((hex) => new THREE.MeshStandardMaterial({
     color: hex,
-    roughness: 0.22,
+    vertexColors: true,
+    roughness: 0.62,
     metalness: 0.0,
     emissive: hex,
-    emissiveIntensity: 0.38,
+    emissiveIntensity: 0.16,
   }));
 
   /**
@@ -227,7 +266,7 @@ export function createEmeems(ctx) {
     map: glowTex,
     color: hex,
     transparent: true,
-    opacity: 0.42,
+    opacity: 0.30,
     blending: THREE.AdditiveBlending,
     depthWrite: false,
     fog: false,

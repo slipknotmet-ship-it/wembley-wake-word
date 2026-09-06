@@ -340,8 +340,8 @@ function buildRig() {
 
   // trunk is everything above the hips, and it is a separate pivot for one
   // reason: the forward lean has to happen at the HIPS. Leaning the whole model
-  // about its feet drives the leading foot a hand's width underground at full
-  // dread, and a foot and a half of it once the monster has doubled in size.
+  // about its feet tips the leading foot underground - a couple of centimetres
+  // at rest, a third of a metre by the time it is at full dread and full size.
   const TRUNK_Y = 1.60;
   const trunk = new THREE.Group();
   trunk.position.y = TRUNK_Y;
@@ -358,20 +358,26 @@ function buildRig() {
   trunk.add(head);
   head.add(blob(matBody, 0.60, 0.50, 0.75, 0, 0, -0.10));    // skull
   head.add(blob(matBody, 0.66, 0.17, 0.34, 0, 0.30, -0.42)); // brow ridge
-  head.add(blob(matMaw, 0.44, 0.22, 0.52, 0, -0.14, -0.42)); // throat
+  // Throat, sitting BEHIND the teeth rather than filling the whole mouth: it
+  // only has to be the black you see past the fangs when the jaw drops.
+  head.add(blob(matMaw, 0.38, 0.20, 0.30, 0, -0.12, -0.30));
 
+  // Eyes sit just PROUD of the skull. The skull is an ellipsoid of radii
+  // (0.60, 0.50, 0.75) centred at z = -0.10, so its surface out at x = 0.26 is
+  // near z = -0.76: an eye centred any shallower than about -0.70 is simply
+  // buried inside the head and never renders at all.
   const eyeL = new THREE.Mesh(geoEye, matEye);
   eyeL.scale.setScalar(0.115);
-  eyeL.position.set(-0.27, 0.12, -0.52);
+  eyeL.position.set(-0.26, 0.10, -0.70);
   const eyeR = eyeL.clone();
-  eyeR.position.x = 0.27;
+  eyeR.position.x = 0.26;
   head.add(eyeL, eyeR);
 
   const glowL = new THREE.Mesh(geoEye, matEyeGlow);
   glowL.scale.setScalar(0.28);
   glowL.position.copy(eyeL.position);
   const glowR = glowL.clone();
-  glowR.position.x = 0.27;
+  glowR.position.x = 0.26;
   head.add(glowL, glowR);
 
   // Jaw pivots at the back of the mouth. The model faces -Z, so a NEGATIVE
@@ -383,8 +389,13 @@ function buildRig() {
   jaw.add(blob(matBody, 0.50, 0.20, 0.60, 0, -0.04, -0.44));
 
   // ----------------------------------------------------------------- teeth
-  // Two instanced rows. Individually invisible at range; collectively they are
-  // the pale line that tells you the mouth is open.
+  // Two instanced rows around the mouth OPENING - three a side, converging
+  // toward the snout. Individually invisible at range; collectively they are
+  // the pale line that tells you the mouth is open. When the jaw is shut the
+  // upper row is swallowed by the jaw blob, so the mouth closes cleanly.
+  const TOOTH_Z = [-0.45, -0.62, -0.78];
+  const TOOTH_X = [0.24, 0.19, 0.11];
+  const TOOTH_LEN = [0.20, 0.17, 0.14];
   const TEETH = 6;
   const mtx = new THREE.Matrix4();
   const quat = new THREE.Quaternion();
@@ -396,22 +407,25 @@ function buildRig() {
     const inst = new THREE.InstancedMesh(geoSpike, matTooth, TEETH);
     inst.castShadow = false;
     for (let i = 0; i < TEETH; i++) {
-      const side = i < TEETH / 2 ? -1 : 1;
-      const k = i % (TEETH / 2);
-      const len = 0.20 - k * 0.03;
-      pos.set(side * (0.25 - k * 0.055), y + (pointUp ? len * 0.5 : -len * 0.5), -0.24 - k * 0.17);
+      const side = i < 3 ? -1 : 1;
+      const k = i % 3;
+      const len = TOOTH_LEN[k];
+      // The cone is centred, so half a length of lift plants its base on the
+      // gum line and points the tip into the mouth.
+      pos.set(side * TOOTH_X[k], y + (pointUp ? len * 0.5 : -len * 0.5), TOOTH_Z[k]);
       eul.set(pointUp ? 0 : Math.PI, 0, side * 0.08);
       quat.setFromEuler(eul);
-      scl.set(0.19, len, 0.19);
+      scl.set(0.17, len, 0.17);
       mtx.compose(pos, quat, scl);
       inst.setMatrixAt(i, mtx);
     }
     inst.instanceMatrix.needsUpdate = true;
+    inst.computeBoundingSphere();
     parent.add(inst);
     return inst;
   };
-  toothRow(head, -0.16, false); // upper fangs, pointing down
-  toothRow(jaw, -0.04, true);   // lower fangs, pointing up
+  toothRow(head, -0.20, false); // upper fangs, hanging from the lip line
+  toothRow(jaw, 0.02, true);    // lower fangs, standing up out of the jaw
 
   // ---------------------------------------------------------------- spikes
   // Ragged dorsal ridge, largest at the shoulders and shrinking down the back.
@@ -499,7 +513,7 @@ function buildRig() {
   return {
     group, body: rig, trunk, head, jaw, setBristle,
     armL, armR, legL, legR,
-    matBody, matEye, matEyeGlow, matSpike, matMaw,
+    matBody, matEye, matEyeGlow, matMaw,
     glowL, glowR,
   };
 }
