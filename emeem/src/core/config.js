@@ -19,6 +19,12 @@ export const CONFIG = {
     jumpBuffer: 0.15,      // grace period to buffer a jump before landing
     turnLerp: 14,          // how fast the hand swings to face travel direction
     spawnHeight: 2.0,
+    // Claw animation. The open is a slow deliberate reach; the snap is fast,
+    // because a grab that closes as slowly as it opens reads as a yawn.
+    reachOpenRate: 7.0,    // how fast the claw spreads as an emeem nears
+    pinchSnapRate: 34.0,   // how fast it slams shut on the catch
+    pinchHoldTime: 0.11,   // seconds the claw stays clamped after a catch
+    pinchReleaseRate: 6.5, // how fast it relaxes back to neutral afterwards
   },
 
   // ---------------------------------------------------------------- camera
@@ -67,6 +73,10 @@ export const CONFIG = {
     magnetRadius: 2.4,     // emeems drift toward you inside this radius
     magnetStrength: 7.0,
     respawnDelay: 0.6,
+    // The claw starts opening this far out, so the hand visibly reaches for an
+    // emeem before it takes it. Must be comfortably wider than magnetRadius or
+    // the anticipation has no room to play before the pickup fires.
+    reachRadius: 4.2,
   },
 
   // --------------------------------------------------------------- monster

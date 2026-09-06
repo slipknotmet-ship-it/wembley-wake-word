@@ -63,6 +63,20 @@ const HAND_FACES_NEG_Z = true;
 /** Pinch relaxes back open at this exponential rate (1 -> ~0.05 in 0.37s). */
 const PINCH_DECAY = 8;
 
+/**
+ * Resting closure of the claw while nothing is within reach. Not fully open:
+ * a hand that runs around with its fingers splayed all game has nowhere to go
+ * when it actually reaches for something.
+ */
+const CLAW_NEUTRAL = 0.30;
+
+/**
+ * How far the hand turns toward an emeem it is reaching for, as a fraction of
+ * the angle between its heading and the emeem. Kept low deliberately - the
+ * hand should glance toward the catch, not stop running to face it.
+ */
+const REACH_YAW_BIAS = 0.45;
+
 /** Landings harder than this shake the camera. A jump apex lands at 8.4 m/s. */
 const LAND_SHAKE_SPEED = 12;
 
@@ -77,6 +91,21 @@ const _hits = [];
 const _stepHits = [];
 
 /** Wraps an angle into -PI..PI so turning always takes the shortest path. */
+/** Clamp to 0..1. */
+function clamp01(v) {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+/**
+ * Frame-rate independent exponential damping toward a target.
+ * `1 - e^(-rate*dt)` is the correct blend factor for "approach with a time
+ * constant of 1/rate seconds"; a raw `rate * dt` lerp changes feel with the
+ * frame rate and overshoots past dt = 1/rate.
+ */
+function dampTo(current, target, rate, dt) {
+  return current + (target - current) * (1 - Math.exp(-rate * dt));
+}
+
 function wrapPi(a) {
   let x = (a + Math.PI) % TAU;
   if (x < 0) x += TAU;
@@ -116,6 +145,9 @@ export function createPlayer(ctx) {
   // Always-advancing cosmetic clock: state.time freezes outside 'playing', but
   // the hand should still idle-breathe on the start and game-over screens.
   let clock = 0;
+  // Seconds left of the post-catch clamp. While this is running the claw is
+  // driven shut; when it expires the claw relaxes back toward neutral.
+  let grabHold = 0;
 
   // Working copies for the collision helpers, so they can mutate position and
   // velocity without out-params or per-step object churn.
@@ -426,16 +458,48 @@ export function createPlayer(ctx) {
     // Below the threshold we simply hold the last yaw: snapping to 0 whenever
     // you stop would spin the hand on every step you take.
 
+    // ------------------------------------------------------- reach and grab
+    // The catch is a two-beat animation and both beats matter:
+    //   1. REACH  - as an emeem comes inside reachRadius the claw spreads open,
+    //               wider the closer it gets. This is the anticipation; without
+    //               it emeems just silently evaporate as you run past them.
+    //   2. GRAB   - the pickup fires, the claw slams shut, holds a moment, then
+    //               relaxes. Snap is ~5x faster than the open, because a grab
+    //               that closes as slowly as it opens reads as a yawn.
+    const EM = CONFIG.emeem;
+    let reachTarget = 0;
+    if (p.hasNearestEmeem && Number.isFinite(p.nearestEmeemDist)) {
+      const span = Math.max(0.001, EM.reachRadius - EM.pickupRadius);
+      reachTarget = clamp01((EM.reachRadius - p.nearestEmeemDist) / span);
+    }
+    p.reach = dampTo(p.reach, reachTarget, P.reachOpenRate, step);
+    if (p.reach < 0.001) p.reach = 0;
+
+    if (grabHold > 0) {
+      grabHold -= step;
+      p.pinch = dampTo(p.pinch, 1, P.pinchSnapRate, step);
+    } else {
+      p.pinch = dampTo(p.pinch, 0, P.pinchReleaseRate, step);
+      if (p.pinch < 0.002) p.pinch = 0;
+    }
+
+    // Glance toward the emeem being reached for, so the claw arrives pointing
+    // at it rather than catching it out of the side of the hand.
+    if (p.reach > 0.01 && p.hasNearestEmeem) {
+      const dx = p.nearestEmeem.x - p.pos.x;
+      const dz = p.nearestEmeem.z - p.pos.z;
+      if (dx * dx + dz * dz > 1e-4) {
+        const toEmeem = HAND_FACES_NEG_Z ? Math.atan2(-dx, -dz) : Math.atan2(dx, dz);
+        p.yaw = wrapPi(p.yaw + wrapPi(toEmeem - p.yaw) * REACH_YAW_BIAS * p.reach);
+      }
+    }
+
     group.position.copy(p.pos);
     group.rotation.y = p.yaw;
 
-    // The claw snaps shut on a catch (bus 'collect' -> pinch = 1) and relaxes
-    // open again from there.
-    if (p.pinch > 0) {
-      p.pinch *= Math.exp(-PINCH_DECAY * step);
-      if (p.pinch < 0.002) p.pinch = 0;
-    }
-    if (handHasPinch) hand.setPinch(p.pinch);
+    // Neutral relaxes toward wide open as the reach builds; the grab overrides
+    // it outright, so a catch always closes no matter where the reach was.
+    if (handHasPinch) hand.setPinch(Math.max(CLAW_NEUTRAL * (1 - p.reach), p.pinch));
 
     if (handHasUpdate) {
       handOpts.speed = speed;
@@ -464,17 +528,20 @@ export function createPlayer(ctx) {
 
     coyote = 0;
     jumpBuf = 0;
-    prevJumpHeld = false;
+    // Seed from the live button so a thumb already resting on JUMP when the
+    // run restarts is not read as a fresh press.
+    prevJumpHeld = state.input.jump === true;
     prevGrounded = false;
 
+    grabHold = 0;
     group.position.copy(p.pos);
     group.rotation.set(0, 0, 0);
-    if (handHasPinch) hand.setPinch(0);
+    if (handHasPinch) hand.setPinch(CLAW_NEUTRAL);
   }
 
-  // Every catch slams the pinch closed; emeem.js owns the pickup test and the
-  // 'collect' event.
-  if (bus) bus.on('collect', () => { state.player.pinch = 1; });
+  // emeem.js owns the pickup test and fires 'collect'. All we do here is start
+  // the clamp; the claw drive in update() plays it out over the next frames.
+  if (bus) bus.on('collect', () => { grabHold = CONFIG.player.pinchHoldTime; });
 
   reset();
 

@@ -22,7 +22,17 @@ export const state = {
     yaw: 0,             // facing, radians
     grounded: false,
     groundY: 0,
-    pinch: 0,           // 0..1 finger-pinch animation
+    pinch: 0,           // 0..1 claw closure: 0 = neutral, 1 = thumb meets index
+    reach: 0,           // 0..1 anticipation as an emeem comes into claw range
+    /**
+     * Nearest live emeem, written by entities/emeem.js every frame and read by
+     * entities/player.js to drive the reach-and-grab. emeem.js owns the search
+     * because it is already iterating the pool for the pickup test, so this
+     * costs nothing extra.
+     */
+    nearestEmeem: new THREE.Vector3(),
+    nearestEmeemDist: Infinity,
+    hasNearestEmeem: false,
     distanceRun: 0,
   },
 
@@ -67,6 +77,10 @@ export function resetState() {
   state.player.grounded = false;
   state.player.groundY = 0;
   state.player.pinch = 0;
+  state.player.reach = 0;
+  state.player.nearestEmeem.set(0, 0, 0);
+  state.player.nearestEmeemDist = Infinity;
+  state.player.hasNearestEmeem = false;
   state.player.distanceRun = 0;
 
   state.monster.pos.set(0, 0, -CONFIG.monster.spawnDistance);

@@ -104,9 +104,40 @@ function releaseCamera() { camOverride = null; engine.camera.fov = CONFIG.camera
 
 function say(t) { label.textContent = t; }
 
+/**
+ * A stand-in emeem, so the reach-and-grab can be looked at before emeem.js
+ * exists. Also writes the nearest-emeem fields that entities/emeem.js will own,
+ * which is what actually drives the claw.
+ */
+let fakeEmeem = null;
+function showEmeem(offsetZ, offsetX = 0.25) {
+  if (!fakeEmeem) {
+    const geo = new THREE.SphereGeometry(CONFIG.emeem.radius, 22, 14);
+    geo.scale(1, 0.45, 1);
+    const mat = new THREE.MeshStandardMaterial({
+      color: CONFIG.palette.emeems[2], roughness: 0.18, metalness: 0.0,
+      emissive: CONFIG.palette.emeems[2], emissiveIntensity: 0.45,
+    });
+    fakeEmeem = new THREE.Mesh(geo, mat);
+    fakeEmeem.castShadow = true;
+    engine.scene.add(fakeEmeem);
+  }
+  const p = state.player.pos;
+  fakeEmeem.visible = true;
+  fakeEmeem.position.set(p.x + offsetX, CONFIG.emeem.hoverY, p.z - offsetZ);
+  state.player.hasNearestEmeem = true;
+  state.player.nearestEmeem.copy(fakeEmeem.position);
+  state.player.nearestEmeemDist = fakeEmeem.position.distanceTo(p);
+}
+function hideEmeem() {
+  if (fakeEmeem) fakeEmeem.visible = false;
+  state.player.hasNearestEmeem = false;
+  state.player.nearestEmeemDist = Infinity;
+}
+
 setTier(0);
 step(60);
-window.__PREVIEW__ = { ctx, state, engine, player, step, setInput, setTier, orbit, releaseCamera, say, CONFIG, renderFrame };
+window.__PREVIEW__ = { ctx, state, engine, player, step, setInput, setTier, orbit, releaseCamera, say, CONFIG, renderFrame, showEmeem, hideEmeem };
 window.__READY__ = true;
 
 let last = performance.now();
