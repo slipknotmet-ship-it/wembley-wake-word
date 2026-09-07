@@ -21,7 +21,7 @@
  */
 import * as THREE from 'three';
 import { CONFIG } from '../core/config.js';
-import { waterAt, lakeIndex, lakeCentreZ, boatSpot, BOATS_PER_LAKE, LAKE_HALF_Z } from '../world/biome.js';
+import { waterAt, lakeIndex, lakeCentreZ, boatSpot, BOATS_PER_LAKE, LAKE_HALF_Z, SHORE_WARP_MAX } from '../world/biome.js';
 
 const B = CONFIG.world.boat;
 const TAU = Math.PI * 2;
@@ -163,7 +163,7 @@ export function createBoats(ctx, material) {
 
     // Re-moor when a different lake becomes the near one. Anything ridden or
     // spent at the old lake is gone: crossing is one-way by construction.
-    if (n >= 0 && n !== lakeShown && Math.abs(p.z - lakeCentreZ(n)) < CONFIG.world.fogFar + LAKE_HALF_Z) {
+    if (n >= 0 && n !== lakeShown && Math.abs(p.z - lakeCentreZ(n)) < CONFIG.world.fogFar + LAKE_HALF_Z + SHORE_WARP_MAX) {
       moorAll(n);
     }
     if (lakeShown < 0) return;

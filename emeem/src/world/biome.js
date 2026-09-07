@@ -126,7 +126,8 @@ export const LAKE_Z0 = 420;
 /** Metres between lake centres. */
 export const LAKE_PERIOD = 1024;
 /**
- * Half-depth along the travel axis: an 72m crossing.
+ * MEAN half-depth along the travel axis: a 72m crossing, plus or minus the
+ * shore warp below, so between 60m and 84m depending where you enter.
  *
  * Not deeper. At full dread the fog far plane closes to 112 * 0.68 = 76m, so a
  * wider lake would be deeper than the entire visible world at the top tiers -
@@ -141,6 +142,31 @@ export const LAKE_HALF_Z = 36;
 export const LAKE_HALF_X = 120;
 /** Metres of taper at every edge, so the shoreline is a ramp not a cliff. */
 const LAKE_FEATHER = 10;
+
+/**
+ * THE SHORE WARP.
+ *
+ * Without this the lake is a rectangle, and a rectangle seen from a camera that
+ * never rotates puts a dead straight horizontal line across the entire screen -
+ * the single most computer-generated thing in the game. Screenshots of the
+ * finished lake made that unmissable: not a lake, a swimming pool.
+ *
+ * Two sines of incommensurate period, so the shore is a long bay with smaller
+ * scallops inside it and never visibly repeats across the 240m width. The phase
+ * offset on the second stops both from crossing zero at the lake centre, which
+ * would put a symmetry axis exactly where the player enters.
+ *
+ * It is a function of the offset from the lake CENTRE, not of world x, so every
+ * lake has the same shore shape and the water mesh can be built once.
+ */
+const SHORE_A1 = 4.0, SHORE_K1 = 1 / 19;
+const SHORE_A2 = 2.0, SHORE_K2 = 1 / 7;
+/** Worst case |shoreWarp|. Every conservative test has to inflate by this. */
+export const SHORE_WARP_MAX = SHORE_A1 + SHORE_A2;
+
+export function shoreWarp(dx) {
+  return Math.sin(dx * SHORE_K1) * SHORE_A1 + Math.sin(dx * SHORE_K2 + 1.7) * SHORE_A2;
+}
 
 export function lakeIndex(z) {
   return Math.round((-z - LAKE_Z0) / LAKE_PERIOD);
@@ -157,11 +183,15 @@ export function lakeCentreX(n) {
 export function waterAt(x, z) {
   const n = lakeIndex(z);
   if (n < 0) return 0;
+  const ox = x - lakeCentreX(n);
+  // The waterline bends with x. Both shores bend the SAME way, so the lake is a
+  // bay that wanders rather than one that gets fatter and thinner.
+  const halfZ = LAKE_HALF_Z + shoreWarp(ox);
   const dz = Math.abs(z - lakeCentreZ(n));
-  if (dz >= LAKE_HALF_Z) return 0;
-  const dx = Math.abs(x - lakeCentreX(n));
+  if (dz >= halfZ) return 0;
+  const dx = Math.abs(ox);
   if (dx >= LAKE_HALF_X) return 0;
-  const fz = (LAKE_HALF_Z - dz) / LAKE_FEATHER;
+  const fz = (halfZ - dz) / LAKE_FEATHER;
   const fx = (LAKE_HALF_X - dx) / LAKE_FEATHER;
   const f = fz < fx ? fz : fx;
   return f >= 1 ? 1 : f;
@@ -178,7 +208,11 @@ export function waterAt(x, z) {
 export function waterNear(x, z, r) {
   const n = lakeIndex(z);
   if (n < 0) return false;
-  return Math.abs(z - lakeCentreZ(n)) < LAKE_HALF_Z + r
+  // SHORE_WARP_MAX, not shoreWarp(ox): this test has to be conservative in the
+  // same direction everywhere, and paying 6m of extra keep-out on the shallow
+  // half of the shore is far cheaper than a boulder standing in the water on
+  // the deep half.
+  return Math.abs(z - lakeCentreZ(n)) < LAKE_HALF_Z + SHORE_WARP_MAX + r
       && Math.abs(x - lakeCentreX(n)) < LAKE_HALF_X + r;
 }
 
@@ -198,7 +232,11 @@ const BOAT_SPACING = 56;
  * you drown looking for.
  */
 export function boatSpot(n, i, out) {
-  out.x = lakeCentreX(n) + (i - 1) * BOAT_SPACING;
-  out.z = lakeCentreZ(n) + LAKE_HALF_Z - 2;   // 2m inside the waterline
+  const ox = (i - 1) * BOAT_SPACING;
+  out.x = lakeCentreX(n) + ox;
+  // 2m inside the waterline AT THIS X. A fixed dz would beach a boat wherever
+  // the shore warp bends the water away from it, and a beached boat is one the
+  // player walks past on dry land wondering why it does nothing.
+  out.z = lakeCentreZ(n) + LAKE_HALF_Z + shoreWarp(ox) - 2;
   return out;
 }

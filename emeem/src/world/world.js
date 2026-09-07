@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import {
   waterAt, waterNear, lakeIndex, lakeCentreX, lakeCentreZ,
-  LAKE_HALF_X, LAKE_HALF_Z,
+  LAKE_HALF_X, LAKE_HALF_Z, shoreWarp, SHORE_WARP_MAX,
 } from './biome.js';
 
 /**
@@ -529,6 +529,12 @@ export function createWorld(ctx) {
   const STACK_GAP = 2.15;
   const STACK_RISE_MAX = 1.35;
   const SCATTER_PER_CHUNK = Math.max(0, Math.round(num(W.scatterPerChunk, 36)));
+  /**
+   * Deepest water that still gets scattered gravel, as a waterAt value. The
+   * shore feather is 10m wide, so 0.35 is the outer 3.5m of it - a shoreline
+   * band, not a lake bed. See the keep-out in the SCATTER pass.
+   */
+  const SHALLOW_MAX = 0.35;
 
   /**
    * Collider tops an emeem may sit on, rebuilt beside the flat collider list.
@@ -640,10 +646,35 @@ export function createWorld(ctx) {
     opacity: 0.72,
     depthWrite: false,
   });
-  const waterMesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(LAKE_HALF_X * 2, LAKE_HALF_Z * 2, 1, 1),
-    waterMaterial,
-  );
+  /**
+   * The surface has to agree with waterAt() exactly, warped shoreline and all,
+   * or there is water you can see and not swim in, or swim in and not see. So
+   * the plane is segmented along X and its two edge rows are displaced by the
+   * same shoreWarp the field uses.
+   *
+   * The geometry is built ONCE, in lake-local coordinates, which is the whole
+   * reason shoreWarp takes an offset from the lake centre rather than a world
+   * x: every lake has the same shore shape, so moving the mesh is still a
+   * position assignment and not a rebuild.
+   *
+   * 2m per segment, 240 triangles for the whole lake. A quarter of one tree.
+   */
+  const WATER_SEGS = Math.round((LAKE_HALF_X * 2) / 2);
+  const waterGeometry = new THREE.PlaneGeometry(LAKE_HALF_X * 2, LAKE_HALF_Z * 2, WATER_SEGS, 1);
+  {
+    // rotation.x = -PI/2 maps local +y to world -z, so the +y row is the FAR
+    // shore and the -y row is the near one. Pushing each outward means adding
+    // the warp to |y| and keeping the sign - one line that bends both shores
+    // the same way, which is what makes it a bay rather than a bulge.
+    const pos = waterGeometry.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      const y = pos.getY(i);
+      pos.setY(i, y + Math.sign(y) * shoreWarp(pos.getX(i)));
+    }
+    pos.needsUpdate = true;
+    waterGeometry.computeVertexNormals();
+  }
+  const waterMesh = new THREE.Mesh(waterGeometry, waterMaterial);
   waterMesh.name = 'water';
   waterMesh.rotation.x = -Math.PI / 2;
   waterMesh.receiveShadow = false;
@@ -659,7 +690,7 @@ export function createWorld(ctx) {
     const cz = lakeCentreZ(n);
     // Only bother when it could be on screen at all: fogFar plus the lake's own
     // half-depth, so it is never popped in while visible.
-    if (Math.abs(pz - cz) > W.fogFar + LAKE_HALF_Z) { waterMesh.visible = false; return; }
+    if (Math.abs(pz - cz) > W.fogFar + LAKE_HALF_Z + SHORE_WARP_MAX) { waterMesh.visible = false; return; }
     waterMesh.position.set(lakeCentreX(n), W.groundY + 0.02, cz);
     waterMesh.visible = true;
   }
@@ -1205,11 +1236,25 @@ export function createWorld(ctx) {
       const pz = originZ + rng() * CS;
       // The spawn keep-out still applies: no clutter under the player's feet.
       if (px * px + pz * pz < W.spawnClearRadius * W.spawnClearRadius) continue;
-      // Ferns do not grow in a lake. Pebbles on the BED are fine and wanted -
-      // they are what makes the transparent surface read as water over ground
-      // rather than as a blue lid - so only the foliage half is rejected.
-      const wet = waterAt(px, pz) > 0;
-      if (wet || rng() < 0.55) {
+      // OPEN WATER GETS NOTHING, AND THE SHALLOWS GET GRAVEL.
+      //
+      // This started life as "pebbles on the BED are fine and wanted - they
+      // are what makes the transparent surface read as water over ground
+      // rather than as a blue lid", and that reasoning was simply wrong about
+      // the geometry. The world is flat, so the water plane sits 2cm above the
+      // ground, while a scatter pebble stands 9 to 30cm tall: nine tenths of
+      // every one of them was ABOVE the waterline. Screenshots of the finished
+      // lake showed hundreds of stones floating on it. It read as a gravel tip,
+      // not a lake.
+      //
+      // The keep-out is on OPEN water only. The outer 3.5m of the feather still
+      // gets its pebbles, and there they do a better job than they ever did on
+      // the bed: a rectangle's shoreline is a dead straight line, and a band of
+      // gravel is what stops that line reading as the edge of a swimming pool.
+      // Ferns still grow nowhere near it.
+      const wet = waterAt(px, pz);
+      if (wet > SHALLOW_MAX) continue;
+      if (wet > 0 || rng() < 0.55) {
         const r = range(rng, 0.20, 0.62);
         const h = range(rng, 0.09, 0.30);
         const vi = pick(rng, ROCK_BLOBS.count);
