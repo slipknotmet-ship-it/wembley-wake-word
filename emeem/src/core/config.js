@@ -164,8 +164,35 @@ export const CONFIG = {
 
   // --------------------------------------------------------------- monster
   monster: {
-    spawnDistance: 34,     // metres behind the player at game start
-    minSpawnDistance: 22,
+    // Where the Protector comes from at the whistle. It used to start 34m
+    // BEHIND you - and the camera sits only 5.4m behind, so it began off-screen
+    // and then entered frame from the bottom facing away up the screen, which
+    // meant you only ever saw its back. It now arrives from a top corner,
+    // walking at you, so the first thing you see is its face.
+    spawnDistance: 30,     // metres from the player at game start
+    minSpawnDistance: 24,  // closest the obstacle sweep may place it instead
+    /**
+     * Radians off straight-ahead (-Z, up the screen), swung to a randomly
+     * chosen side each run. 0.70 rad = 40 degrees.
+     *
+     * Chosen by projecting it: the camera's horizontal half-angle is
+     * atan(tan(fov/2) * aspect) = 55.6 degrees at 1040x480 and 50.2 at the
+     * iPhone SE's 667x375. At 30m and 40 degrees the creature lands 47% of the
+     * way to the frame edge on the S25 Ultra and 57% on the SE - upper corner
+     * on every screen the suite runs, and comfortably inside the frustum on
+     * the widest one rather than clipped off the side of the narrowest.
+     */
+    spawnAngle: 0.70,
+    /**
+     * Which side it comes from: 0 rolls a coin every run, -1 or +1 forces it.
+     * Forcing exists for the test suite. A random side makes every
+     * monster-distance assertion non-deterministic - the scripted bot walks a
+     * fixed path, so whether it walks toward the Protector or away from it
+     * decides the result, and the same check passed at 18.8m and failed at
+     * 6.2m on consecutive runs of identical code. Tests pin the side; the game
+     * never does.
+     */
+    spawnSide: 0,
     catchRadius: 1.35,
     baseSpeed: 4.6,        // m/s at level 0 (slower than the player)
     turnRate: 3.2,         // rad/s steering

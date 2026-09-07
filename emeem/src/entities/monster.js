@@ -317,22 +317,45 @@ export function createMonster(ctx) {
   let clock = 0;
 
   /**
-   * Places the monster spawnDistance behind the player. Behind is +Z: the
-   * camera looks down -Z and you run that way, so anything at +Z is at your
-   * back. If that spot is inside a rock we sweep around the arc rather than
+   * Places the Protector spawnDistance away, spawnAngle off straight-ahead, on
+   * a randomly chosen side - so it walks into frame from one of the two top
+   * corners with its face toward you.
+   *
+   * Ahead is -Z: the camera looks down -Z and you run that way. Putting it at
+   * +Z, as this did before, hid it entirely - the camera sits 5.4m behind you
+   * and the creature 34m behind that, so it spawned off-screen and could only
+   * ever enter frame from the bottom, facing the same way the camera looks.
+   * You saw its back for the whole run.
+   *
+   * If the ideal spot is inside a rock we sweep around the heading rather than
    * spawning it embedded, never closer than minSpawnDistance.
    */
-  function placeBehindPlayer(world) {
+  function placeForEntrance(world) {
     const p = state.player.pos;
     const m = state.monster;
 
-    // Angle measured in the XZ plane from +Z (directly behind the player).
-    const OFFSETS = [0, 0.26, -0.26, 0.52, -0.52, 0.85, -0.85, 1.3, -1.3];
+    // Angles are measured in the XZ plane from +Z, which is straight BEHIND
+    // the player - that is the convention sin/cos are used with below. Pi is
+    // therefore straight ahead, up the screen, and we swing spawnAngle off it
+    // to a randomly chosen side.
+    //
+    // Math.random, deliberately, not the world's seeded rng: chunk contents
+    // must be reproducible for a given seed, but which shoulder the Protector
+    // comes over should differ every single run, including two runs of the same
+    // world. It is re-rolled here rather than at construction, so a restart
+    // gets a fresh coin.
+    const side = M.spawnSide || (Math.random() < 0.5 ? -1 : 1);
+    const BASE_A = Math.PI - M.spawnAngle * side;
+    // Fallbacks sweep AROUND that heading if the ideal spot is inside a rock,
+    // scaled by `side` so the sweep opens toward the centre of the screen
+    // first - a nudge inward keeps it in frame, a nudge outward might not.
+    const OFFSETS = [0, 0.20, -0.20, 0.42, -0.42, 0.70, -0.70, 1.0, -1.0]
+      .map((o) => BASE_A + o * side);
     const radii = [M.spawnDistance, Math.max(M.minSpawnDistance, M.spawnDistance * 0.8)];
     const r = BODY_RADIUS * Math.max(1, m.scale);
 
-    let bx = p.x;
-    let bz = p.z + M.spawnDistance;
+    let bx = p.x + Math.sin(BASE_A) * radii[0];
+    let bz = p.z + Math.cos(BASE_A) * radii[0];
     if (world && typeof world.queryAABB === 'function') {
       let placed = false;
       for (let ri = 0; ri < radii.length && !placed; ri++) {
@@ -365,9 +388,10 @@ export function createMonster(ctx) {
     m.proximity = clamp01(1 - m.distanceToPlayer / 30);
   }
 
-  // Correct the seeded -Z position immediately, so the start screen is not
-  // staring at a monster loitering in front of the player. No world yet.
-  placeBehindPlayer(null);
+  // Place it immediately, so the start screen is not staring at a monster
+  // sitting wherever the state object happened to seed it. No world yet, so
+  // the obstacle sweep is skipped and the ideal heading is taken as-is.
+  placeForEntrance(null);
 
   /**
    * Picks a heading. One queryAABB fetches every collider within probe range,
@@ -687,7 +711,7 @@ export function createMonster(ctx) {
     const m = state.monster;
     m.speed = M.baseSpeed;
     m.scale = M.baseScale;
-    placeBehindPlayer(ctx.world);
+    placeForEntrance(ctx.world);
 
     caught = false;
     scraping = false;

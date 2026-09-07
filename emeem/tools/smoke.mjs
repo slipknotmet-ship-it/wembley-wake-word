@@ -62,6 +62,13 @@ await page.goto(URL, { waitUntil: 'load', timeout: 45000 });
 // ---------------------------------------------------------------- boot
 await page.waitForFunction(() => !!window.__EMEEM__, null, { timeout: 30000 })
   .catch(() => { throw new Error('window.__EMEEM__ never appeared - the module graph failed to load. Console:\n' + errors.join('\n')); });
+
+// Pin the Protector's entrance side. It is a coin flip in the real game, and
+// the scripted bot below walks a FIXED path - so whether that path runs toward
+// the creature or away from it decides the result. Unpinned, the same check
+// passed at 18.8m and failed at 6.2m on consecutive runs of identical code.
+// The game keeps its coin; the suite does not get to be flaky.
+await page.evaluate(() => { window.__EMEEM__.CONFIG.monster.spawnSide = -1; });
 await sleep(1200);
 
 const boot = await page.evaluate(() => {
