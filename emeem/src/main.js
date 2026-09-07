@@ -174,4 +174,4 @@ hud.showStart();
 requestAnimationFrame(frame);
 
 // Expose a tiny handle for the automated smoke test / manual debugging.
-window.__EMEEM__ = { ctx, state, bus, startRun, engine, world: ctx.world, player, monster, emeems };
+window.__EMEEM__ = { ctx, state, bus, startRun, engine, world: ctx.world, player, monster, emeems, touch };
