@@ -50,6 +50,10 @@ export const state = {
     speed: CONFIG.monster.baseSpeed,
     scale: CONFIG.monster.baseScale,
     distanceToPlayer: CONFIG.monster.spawnDistance,
+    // Which shoulder it comes over this run: -1 left, +1 right. Rolled by
+    // monster.js. Present here so it exists before the first roll - a test
+    // reading it on the start card must not see undefined.
+    entranceSide: 1,
     proximity: 0,       // 0 = far away, 1 = right on top of you
   },
 
@@ -97,6 +101,7 @@ export function resetState() {
   state.monster.speed = CONFIG.monster.baseSpeed;
   state.monster.scale = CONFIG.monster.baseScale;
   state.monster.distanceToPlayer = CONFIG.monster.spawnDistance;
+  state.monster.entranceSide = 1;
   state.monster.proximity = 0;
 
   state.input.x = 0;

@@ -83,10 +83,27 @@ export const CONFIG = {
     obstacleMinSize: 1.1,
     obstacleMaxSize: 4.2,
     obstacleMaxHeight: 6.0,
+    /**
+     * Trees get their own height band, separate from obstacleMaxSize, because
+     * the crown radius is now derived from the TREE's height rather than from
+     * the generic prop half-size. Sharing one key pegged every crown above
+     * ~7.5m to the same ceiling, which is what made 9.4% of trees wear an
+     * identically-clamped canopy.
+     */
+    treeHeightMin: 8.0,
+    treeHeightMax: 11.0,
     // Keeps the immediate spawn area clear so you never start inside a rock.
     spawnClearRadius: 7,
     fogNear: 26,
-    fogFar: 150,
+    /**
+     * 112, down from 150. viewChunks 3 guarantees only 96m of streamed ground
+     * (3 * 32); past that a chunk may or may not exist yet, and an 11m tree
+     * materialising at that seam is far more visible than a 6m one was. At 150
+     * the pop showed at 43.5% contrast; at 112 the fog factor at 96m is
+     * (96-26)/(112-26) = 0.814, so the same pop shows at 18.6%.
+     * Raise this ONLY together with viewChunks: fogFar <= viewChunks * chunkSize * 1.17.
+     */
+    fogFar: 112,
   },
 
   // ---------------------------------------------------------------- emeems
@@ -102,7 +119,12 @@ export const CONFIG = {
     // meant an almost empty field - two visible in a whole screenshot. 14 puts
     // roughly 80 in the streamed ring, one every ~8.5m, so there is always one
     // worth breaking your line for without them carpeting the ground.
-    perChunk: 14,          // target emeems alive per streamed chunk
+    // 18, not 14: perChunk is a DENSITY (per chunkSize^2), and the live count
+    // is that density times the ring area - which fogFar 112 shrank from
+    // PI*(45^2-12^2) = 5909 m^2 to PI*(33.6^2-12^2) = 3094 m^2. Holding 14
+    // would have left 42 emeems alive against today's 81. 18 gives 54, which
+    // keeps the SCREEN as full as it is now inside the shorter draw distance.
+    perChunk: 18,          // target emeems alive per streamed chunk
     bobHeight: 0.28,
     bobSpeed: 2.1,
     spinSpeed: 1.4,

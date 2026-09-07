@@ -222,9 +222,13 @@ export function createRenderer(canvasEl) {
       // tiers the monster moves at 9.2 m/s through a world that is 22 obstacles
       // per chunk thick - about five seconds of warning, most of it spent
       // unable to see what you are about to run into. Atmospheric, unplayable.
-      // 0.50 still collapses the world around you without blinding you in it.
+      // 0.68, not the 0.50 this carried while fogFar was 150. The multiplier is
+      // calibrated against an ABSOLUTE visibility floor, not a ratio: 150*0.50
+      // gave 75m at dread 1, and 112*0.50 would give 56m - a whisker above the
+      // ~51m measured unplayable above. 112*0.68 = 76.2m restores it.
+      // Re-derive this if fogFar moves again.
       scene.fog.near = lerp(CONFIG.world.fogNear, CONFIG.world.fogNear * 0.42, d);
-      scene.fog.far = lerp(CONFIG.world.fogFar, CONFIG.world.fogFar * 0.50, d);
+      scene.fog.far = lerp(CONFIG.world.fogFar, CONFIG.world.fogFar * 0.68, d);
     }
 
     sun.color.copy(sunCalmC).lerp(sunDreadC, d);

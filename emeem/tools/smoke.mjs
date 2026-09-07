@@ -205,13 +205,22 @@ await page.evaluate(() => {
 // of GAME time and the monster's speed ease has hardly started. Sleeping longer
 // would work on this machine and break on a faster or slower one; waiting for
 // convergence tests the behaviour instead of the frame rate.
+// The bar is GAME time, not wall time. The monster's speed damps toward the
+// tier target at rate 1.6, so converging from 4.6 to past 6 takes 0.46s of game
+// time - but the wall time that costs depends entirely on the frame rate, and
+// this suite shares a machine. A 40s wall-clock budget looked generous and
+// still produced a 5.26 m/s failure on a loaded box, then passed at 6.97 on a
+// quiet one, from identical code. So: run until the SIMULATION has advanced far
+// enough for convergence to be a fact, and only then read the values.
+await page.evaluate(() => { window.__T0__ = window.__EMEEM__.state.time; });
 const escalated = await page.waitForFunction(() => {
   const s = window.__EMEEM__.state;
-  if (s.monster.speed <= 6 || s.dread <= 0.3) return false;
-  return { level: s.level.name, idx: s.levelIndex, speed: s.monster.speed, dread: s.dread, scale: s.monster.scale };
-}, null, { timeout: 40000 }).then((h) => h.jsonValue()).catch(async () => page.evaluate(() => {
+  const settled = s.time - window.__T0__ > 3;   // 6.5x the 0.46s time constant
+  if (!settled && (s.monster.speed <= 6 || s.dread <= 0.3)) return false;
+  return { level: s.level.name, idx: s.levelIndex, speed: s.monster.speed, dread: s.dread, scale: s.monster.scale, gameSeconds: +(s.time - window.__T0__).toFixed(2) };
+}, null, { timeout: 120000 }).then((h) => h.jsonValue()).catch(async () => page.evaluate(() => {
   const s = window.__EMEEM__.state;
-  return { level: s.level.name, idx: s.levelIndex, speed: s.monster.speed, dread: s.dread, scale: s.monster.scale };
+  return { level: s.level.name, idx: s.levelIndex, speed: s.monster.speed, dread: s.dread, scale: s.monster.scale, gameSeconds: -1 };
 }));
 check('threat level escalates with score', escalated.idx >= 4, `${escalated.level} (tier ${escalated.idx})`);
 check('monster speeds up with the tier', escalated.speed > 6, `${escalated.speed.toFixed(2)} m/s`);

@@ -448,17 +448,30 @@ export function createWorld(ctx) {
    */
   const CANOPY_FLOOR = CONFIG.camera.height + 0.15;
 
-  const TREE_H_MIN = W.obstacleMaxHeight * 0.77;
-  const TREE_H_MAX = W.obstacleMaxHeight;
-  const CROWN_R_MAX = HALF_MAX;
-  const CROWN_R_MIN = HALF_MAX * 0.38;
+  const TREE_H_MIN = W.treeHeightMin;   // 8.0
+  const TREE_H_MAX = W.treeHeightMax;   // 11.0
+  /** Crown radius ceiling as a fraction of the TREE's own height, so a tall
+   *  tree gets a proportionate canopy instead of the generic prop half-size. */
+  const CROWN_R_PER_H = 0.42;
+  const CROWN_R_MIN = 1.2;
+  /** Trunk bottom radius as a fraction of tree height: slenderness 7.2 to 11.1.
+   *  Thickness follows the TREE, not the crown - a 9m tree on the old
+   *  0.19-0.39m trunk is a broom handle. */
+  const TRUNK_R_PER_H_MIN = 0.045;
+  const TRUNK_R_PER_H_MAX = 0.069;
   const TREE_LEAN_MAX = 0.18; // radians, ~10 degrees. Breaks the warehouse look.
-  /** Height a leaning trunk gives up to its own tilt, at the worst case. */
-  const LEAN_LOSS = TREE_H_MAX * (1 - Math.cos(TREE_LEAN_MAX));
+  /** Metres the trunk TOP may wander off its base. The lean has to be capped by
+   *  DISPLACEMENT rather than by angle now: a fixed 0.18 rad on an 11m trunk
+   *  drags the canopy 1.97m sideways, which reads as a fallen tree rather than
+   *  a leaning one - and drags the bark that far outside its vertical collider. */
+  const TREE_LEAN_XZ_MAX = 1.1;
+  /** Worst-case height a leaning trunk gives up, now bounded by that displacement. */
+  const LEAN_LOSS = TREE_H_MAX - Math.sqrt(TREE_H_MAX * TREE_H_MAX - TREE_LEAN_XZ_MAX * TREE_LEAN_XZ_MAX);
   /** How far below the trunk top the lowest leaf may reach, as a fraction of crown height. */
   const CANOPY_DROP = 0.2;
-  /** Shortest crown worth drawing. Below this a tree reads as a fence post. */
-  const MIN_CROWN_H = 1.0;
+  /** Shortest crown worth drawing. 1.0 was fine on a 5m tree; on a 9.5m one it
+   *  is a flagpole. */
+  const MIN_CROWN_H = 1.8;
   /** Trunk height the canopy floor demands of a tree of total height h. */
   const minTrunkFor = (h) => (CANOPY_FLOOR + LEAN_LOSS + CANOPY_DROP * h) / (1 + CANOPY_DROP);
   /**
@@ -658,6 +671,17 @@ export function createWorld(ctx) {
     return false;
   }
 
+  /**
+   * Guaranteed DIAGONAL gate between any two colliders placed in one chunk.
+   * The player is 0.90m across, so 1.20 leaves 30cm of squeeze. Two boxes
+   * offset at 45 degrees leave hypot(dx,dz) = D - sqrt(2)*(halfA+halfB), so
+   * demanding this spacing from every collider-bearing prop makes the gate a
+   * CONSTRUCTION rather than an accident. It matters far more now that trunk
+   * colliders are up to 2m wide instead of 1.06m.
+   */
+  const PASS_GAP = 1.20;
+  const spacingFor = (half) => half * Math.SQRT2 + (PASS_GAP - OBSTACLE_GAP) * 0.5;
+
   function pushCollider(bucket, cx, cz, halfX, halfZ, top) {
     bucket.push({
       min: new THREE.Vector3(cx - halfX, W.groundY, cz - halfZ),
@@ -679,7 +703,7 @@ export function createWorld(ctx) {
    */
   function placeTree(rng, originX, originZ, bucket) {
     const h = Math.max(range(rng, TREE_H_MIN, TREE_H_MAX), MIN_TREE_H);
-    const trunkFrac = range(rng, 0.6, 0.73);
+    const trunkFrac = range(rng, 0.62, 0.75);
     // Keep the lowest leaf above the chase camera: with the canopy reaching
     // CANOPY_DROP * crownH below the trunk top, that solves to this floor.
     const trunkH = clamp(h * trunkFrac, minTrunkFor(h), h - MIN_CROWN_H);
@@ -687,9 +711,11 @@ export function createWorld(ctx) {
     // Crown WIDTH follows crown HEIGHT. Rolling the two independently gave
     // short trees a full-width canopy, which reads as a parasol on a pole
     // rather than as a tree.
-    const crownR = clamp(crownH * range(rng, 0.78, 1.18), CROWN_R_MIN, CROWN_R_MAX);
-    const trunkR = range(rng, 0.15, 0.2) + crownR * range(rng, 0.05, 0.09);
-    const lean = range(rng, 0, TREE_LEAN_MAX);
+    const crownR = clamp(crownH * range(rng, 0.78, 1.18), CROWN_R_MIN, h * CROWN_R_PER_H);
+    const trunkR = h * range(rng, TRUNK_R_PER_H_MIN, TRUNK_R_PER_H_MAX);
+    // Cap the lean by displacement, not angle - see TREE_LEAN_XZ_MAX.
+    const leanMax = Math.min(TREE_LEAN_MAX, Math.asin(Math.min(1, TREE_LEAN_XZ_MAX / trunkH)));
+    const lean = range(rng, 0, leanMax);
     const leanDir = rng() * TAU;
     const leanXZ = Math.sin(lean) * trunkH;
 
@@ -698,7 +724,7 @@ export function createWorld(ctx) {
     // Spacing is measured trunk-to-trunk, not canopy-to-canopy: canopies are
     // meant to knit together overhead, but two trunks must always leave a gap
     // a running hand (and, for as long as it fits, the Protector) can take.
-    const spacing = Math.max(crownR * 0.72, 1.35);
+    const spacing = Math.max(crownR * 0.72, spacingFor(colliderHalf));
 
     if (!findSpot(rng, originX, originZ, colliderHalf + 0.02, spacing, visualR)) return;
     const px = spotX;

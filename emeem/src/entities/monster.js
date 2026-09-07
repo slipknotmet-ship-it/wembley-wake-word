@@ -112,6 +112,29 @@ const RUBBER_MAX = 1.35;
  *  collision box is deliberately narrower so it does not snag on corners it
  *  visually clears. */
 const BODY_RADIUS = 0.85;
+
+/**
+ * Escape hatches for an entrance spot that lands inside a tree, ordered so the
+ * framing can only get SAFER, never worse.
+ *
+ * RADII FIRST, because on-screen X is a BEARING, not a distance: sliding from
+ * 30m to 42m along the SAME ray moves the silhouette from 0.582 to 0.616 of
+ * half-width on a 667x375 frame - three points. That axis is nearly free, so
+ * exhaust it before touching the bearing. Radii never SHRINK either: pulling
+ * the spawn in is the one fallback that costs reaction time.
+ *
+ * Only when every radius is blocked do we bend the bearing, and every bend is
+ * INWARD. That is the whole safety argument: no hatch can push the creature off
+ * the narrowest phone, because every one moves it further IN.
+ *
+ * The symmetric sweep this replaces mapped [0, +0.20, -0.20, ... +1.0, -1.0]
+ * onto the heading, so half its hatches bent OUTWARD: bearing 1.12 projects to
+ * ndc.x 1.245 - off the side of a 667x375 screen - and bearing 1.70 lands 15.4
+ * half-widths out and level with the player rather than ahead of him. One tree
+ * on the ideal spot silently cost the entire feature.
+ */
+const SPAWN_RADII  = [1, 1.2, 1.4];   // multiples of spawnDistance, never < 1
+const SPAWN_INWARD = [0, 0.10, 0.20]; // radians, always toward straight ahead
 /** Rig height at scale 1, used only to bound the collider query in Y. */
 const BODY_HEIGHT = 3.4;
 /** Kerb height it simply tramples rather than paths around, at scale 1. The
@@ -316,6 +339,17 @@ export function createMonster(ctx) {
   // thing standing over your corpse should still breathe.
   let clock = 0;
 
+  // Rolled once per run. The construction-time placement and the FIRST run
+  // deliberately share a roll, so pressing PLAY never pops the Protector from
+  // one shoulder to the other; every restart re-rolls.
+  let entranceSide = Math.random() < 0.5 ? -1 : 1;
+  let firstRun = true;
+  function rollEntranceSide() {
+    if (firstRun) firstRun = false;
+    else entranceSide = Math.random() < 0.5 ? -1 : 1;
+    state.monster.entranceSide = M.spawnSide || entranceSide;
+  }
+
   /**
    * Places the Protector spawnDistance away, spawnAngle off straight-ahead, on
    * a randomly chosen side - so it walks into frame from one of the two top
@@ -337,32 +371,26 @@ export function createMonster(ctx) {
     // Angles are measured in the XZ plane from +Z, which is straight BEHIND
     // the player - that is the convention sin/cos are used with below. Pi is
     // therefore straight ahead, up the screen, and we swing spawnAngle off it
-    // to a randomly chosen side.
-    //
-    // Math.random, deliberately, not the world's seeded rng: chunk contents
-    // must be reproducible for a given seed, but which shoulder the Protector
-    // comes over should differ every single run, including two runs of the same
-    // world. It is re-rolled here rather than at construction, so a restart
-    // gets a fresh coin.
-    const side = M.spawnSide || (Math.random() < 0.5 ? -1 : 1);
+    // to the side rolled for this run by rollEntranceSide().
+    const side = M.spawnSide || entranceSide;
     const BASE_A = Math.PI - M.spawnAngle * side;
-    // Fallbacks sweep AROUND that heading if the ideal spot is inside a rock,
-    // scaled by `side` so the sweep opens toward the centre of the screen
-    // first - a nudge inward keeps it in frame, a nudge outward might not.
-    const OFFSETS = [0, 0.20, -0.20, 0.42, -0.42, 0.70, -0.70, 1.0, -1.0]
-      .map((o) => BASE_A + o * side);
-    const radii = [M.spawnDistance, Math.max(M.minSpawnDistance, M.spawnDistance * 0.8)];
     const r = BODY_RADIUS * Math.max(1, m.scale);
 
-    let bx = p.x + Math.sin(BASE_A) * radii[0];
-    let bz = p.z + Math.cos(BASE_A) * radii[0];
+    let bx = p.x + Math.sin(BASE_A) * M.spawnDistance;
+    let bz = p.z + Math.cos(BASE_A) * M.spawnDistance;
     if (world && typeof world.queryAABB === 'function') {
       let placed = false;
-      for (let ri = 0; ri < radii.length && !placed; ri++) {
-        for (let i = 0; i < OFFSETS.length; i++) {
-          const a = OFFSETS[i];
-          const x = p.x + Math.sin(a) * radii[ri];
-          const z = p.z + Math.cos(a) * radii[ri];
+      // Distance first, bearing second, and every bend inward - see the
+      // SPAWN_RADII / SPAWN_INWARD comment. The outer loop is the bearing so
+      // that all three distances are exhausted on the ideal bearing before it
+      // is given up at all.
+      for (let ni = 0; ni < SPAWN_INWARD.length && !placed; ni++) {
+        // + side * inward bends TOWARD the screen centre for either shoulder.
+        const a = BASE_A + side * SPAWN_INWARD[ni];
+        for (let ri = 0; ri < SPAWN_RADII.length; ri++) {
+          const d = Math.max(M.minSpawnDistance, M.spawnDistance * SPAWN_RADII[ri]);
+          const x = p.x + Math.sin(a) * d;
+          const z = p.z + Math.cos(a) * d;
           const floorY = CONFIG.world.groundY + STEP_OVER * m.scale;
           _qMin.set(x - r, floorY, z - r);
           _qMax.set(x + r, floorY + BODY_HEIGHT * m.scale, z + r);
@@ -391,6 +419,7 @@ export function createMonster(ctx) {
   // Place it immediately, so the start screen is not staring at a monster
   // sitting wherever the state object happened to seed it. No world yet, so
   // the obstacle sweep is skipped and the ideal heading is taken as-is.
+  rollEntranceSide();
   placeForEntrance(null);
 
   /**
@@ -711,6 +740,7 @@ export function createMonster(ctx) {
     const m = state.monster;
     m.speed = M.baseSpeed;
     m.scale = M.baseScale;
+    rollEntranceSide();
     placeForEntrance(ctx.world);
 
     caught = false;
