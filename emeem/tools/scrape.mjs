@@ -24,6 +24,7 @@ const _u = process.argv.indexOf('--url');
 const URL = (_u >= 0 && process.argv[_u + 1]) || 'http://127.0.0.1:4199/';
 const PINNED = '/opt/pw-browsers/chromium';
 const TIERS = [0, 5, 12, 22, 35, 50, 70, 95];
+const TIER_NAME = ['Watching', 'Stirring', 'Hunting', 'Furious', 'Ravenous', 'Nightmare', 'Devourer', 'THE END'];
 
 const browser = await chromium.launch({
   ...(existsSync(PINNED) ? { executablePath: PINNED } : {}),
@@ -46,6 +47,7 @@ for (const score of TIERS) {
   // Drive the player so the creature is actually chasing through the world,
   // not standing still in an empty clearing - a stationary chase measures
   // nothing about how often it hits things.
+  const sc = score;
   await page.evaluate((sc) => {
     const g = window.__EMEEM__;
     if (g.state.phase !== 'playing') g.startRun();
@@ -58,13 +60,27 @@ for (const score of TIERS) {
   // A wandering player, so the creature crosses varied ground rather than
   // tracking one straight corridor.
   const drive = setInterval(() => {
-    page.evaluate(() => {
-      const s = window.__EMEEM__.state;
-      if (s.phase !== 'playing') { window.__EMEEM__.startRun(); return; }
+    page.evaluate((sc) => {
+      const g = window.__EMEEM__;
+      const s = g.state;
+      if (s.phase !== 'playing') {
+        // RE-APPLY THE TIER. startRun() zeroes the score, which drops the tier
+        // straight back to Watching - so a death mid-cell used to leave the
+        // rest of that cell measuring tier 0 while still labelled Devourer.
+        // The first run of this tool printed "Watching" in three cells that had
+        // asked for Furious, Nightmare and Devourer, with collider counts
+        // jumping 554, 324, 334, 651 instead of climbing. Restoring the score
+        // is what makes a cell measure the tier it claims to.
+        g.startRun();
+        s.score = 0;
+        g.ctx.addScore(sc);
+        s.monster.slowT = 0;
+        return;
+      }
       const t = s.time;
       s.input.z = Math.sin(t * 0.7) > -0.3 ? 1 : 0;
       s.input.x = Math.sin(t * 0.31) > 0.2 ? 1 : (Math.sin(t * 0.31) < -0.2 ? -1 : 0);
-    }).catch(() => {});
+    }, sc).catch(() => {});
   }, 120);
   await page.waitForFunction(() => window.__EMEEM__.state.time - window.__T0__ > 12,
     null, { timeout: 300000, polling: 100 }).catch(() => {});
@@ -75,12 +91,26 @@ for (const score of TIERS) {
     return { ...st, name: g.state.level.name, colliders: g.world.colliders.length };
   });
   const muMax = 1 - 0.45 * r.p;
-  rows.push({ ...r, muMax });
-  console.log(`  ${r.name.padEnd(10)} ${r.p.toFixed(4)}   ${muMax.toFixed(4)}   ${r.colliders}`);
+  // A cell that did not end on the tier it asked for measured something else,
+  // and must not be reported as if it had.
+  const want = TIER_NAME[TIERS.indexOf(score)];
+  const clean = r.name === want;
+  rows.push({ ...r, muMax, clean, want });
+  console.log(`  ${r.name.padEnd(10)} ${r.p.toFixed(4)}   ${muMax.toFixed(4)}   ${String(r.colliders).padStart(5)}` +
+              (clean ? '' : `   <-- DISCARDED, asked for ${want}`));
   await page.evaluate(() => { const i = window.__EMEEM__.state.input; i.x = 0; i.z = 0; });
 }
 await browser.close();
 
-const worst = rows.reduce((a, b) => (b.muMax < a.muMax ? b : a));
-console.log(`\n  tightest ceiling: mu <= ${worst.muMax.toFixed(4)} at ${worst.name} (p = ${worst.p.toFixed(4)})`);
-console.log(`  a swim multiplier above that makes the creature FASTER in water than on land.`);
+const good = rows.filter((r) => r.clean);
+if (good.length !== rows.length) {
+  console.log(`\n  ${rows.length - good.length} of ${rows.length} cells discarded - they did not end on the tier they asked for.`);
+}
+if (!good.length) {
+  console.log('\n  NO CLEAN CELLS. Nothing measured.');
+  process.exitCode = 1;
+} else {
+  const worst = good.reduce((a, b) => (b.muMax < a.muMax ? b : a));
+  console.log(`\n  tightest ceiling: mu <= ${worst.muMax.toFixed(4)} at ${worst.name} (p = ${worst.p.toFixed(4)}), over ${good.length} clean cells`);
+  console.log('  a swim multiplier above that makes the creature FASTER in water than on land.');
+}
