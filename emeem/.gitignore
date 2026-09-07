@@ -16,4 +16,11 @@ android/local.properties
 # Build output an agent produced for an A/B comparison; it was swept into a
 # commit by a broad `git add` and does not belong in the tree.
 dist-baseline/
+
+# Scratch probes. Verification agents write throwaway harnesses next to the
+# real tools; one of them (_probe.mjs) duplicated smoke.mjs against the wrong
+# port and read renderer.info, which measures the monster portrait rather than
+# the game. Real tooling gets a real name and a docstring; scratch gets an
+# underscore and stays out of the tree.
+tools/_*.mjs
 .DS_Store
