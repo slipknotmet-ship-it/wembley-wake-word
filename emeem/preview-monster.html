@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Emeem - monster candidates</title>
+<style>
+  html, body { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#0b0510; }
+  #game-canvas { position:fixed; inset:0; width:100%; height:100%; display:block; }
+  #label { position:fixed; left:0; right:0; bottom:0; padding:8px 14px; z-index:5;
+           font:600 15px/1.4 system-ui, sans-serif; color:#fff;
+           background:linear-gradient(transparent, rgba(0,0,0,.75)); text-shadow:0 1px 3px #000; }
+</style>
+</head>
+<body>
+  <canvas id="game-canvas"></canvas>
+  <div id="label"></div>
+<script type="module">
+/**
+ * Dev-only bench for the candidate monster rigs. Loads whichever candidates
+ * exist, mounts one at a time, and exposes anger/mouth controls so they can be
+ * screenshotted at matched settings. Not part of the shipped build.
+ */
+import * as THREE from 'three';
+import { CONFIG } from './src/core/config.js';
+
+const canvas = document.getElementById('game-canvas');
+const label = document.getElementById('label');
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(window.innerWidth, window.innerHeight, false);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x93b7d8);
+const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 200);
+
+scene.add(new THREE.HemisphereLight(0xbcd6f0, 0x6b6350, 1.25));
+const sun = new THREE.DirectionalLight(0xfff2dc, 2.6);
+sun.position.set(6, 12, 9);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+Object.assign(sun.shadow.camera, { left: -8, right: 8, top: 10, bottom: -4, near: 1, far: 40 });
+sun.shadow.camera.updateProjectionMatrix();
+sun.shadow.bias = -0.0007;
+scene.add(sun, sun.target);
+
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(80, 80),
+  new THREE.MeshStandardMaterial({ color: 0x6fbf73, roughness: 1 }),
+);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// Load whichever candidates are present; a missing one is not an error.
+// 'final' is the merged rig that gets shipped; a, b, c are the candidates.
+const CANDIDATES = ['final', 'a', 'b', 'c'];
+const built = {};
+for (const key of CANDIDATES) {
+  try {
+    const mod = await import(key === 'final' ? './src/entities/monsterFace.js' : `./src/entities/monsterFace_${key}.js`);
+    if (typeof mod.buildFace === 'function') built[key] = mod.buildFace(THREE, CONFIG);
+  } catch (err) {
+    console.warn(`candidate ${key} unavailable:`, err.message);
+  }
+}
+
+let current = null;
+let currentKey = null;
+let clock = 0;
+
+function mount(key) {
+  if (current) scene.remove(current.group);
+  current = built[key] || null;
+  currentKey = key;
+  if (!current) { label.textContent = `candidate ${key}: not built`; return false; }
+  current.group.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+  scene.add(current.group);
+  frameIt();
+  return true;
+}
+
+/** Frame the creature so all candidates are photographed at the same size. */
+function frameIt(angleDeg = 0, distMul = 1.55) {
+  const h = (current && current.height) || 3.4;
+  const a = (angleDeg * Math.PI) / 180;
+  const d = h * distMul;
+  camera.position.set(Math.sin(a) * d, h * 0.62, Math.cos(a) * d);
+  camera.lookAt(0, h * 0.5, 0);
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+}
+
+function setAnger(t) { if (current && current.setAnger) current.setAnger(t); }
+function setMouth(t) { if (current && current.setMouthOpen) current.setMouthOpen(t); }
+
+/** Deterministic stepping so screenshots are reproducible. */
+function step(frames = 1, dt = 1 / 60, opts = {}) {
+  for (let i = 0; i < frames; i++) {
+    clock += dt;
+    if (current && current.update) {
+      current.update(dt, {
+        anger: opts.anger ?? 0, proximity: opts.proximity ?? 0,
+        speed: opts.speed ?? 4.6, time: clock,
+      });
+    }
+  }
+  renderer.render(scene, camera);
+}
+
+function resize() {
+  renderer.setSize(window.innerWidth, window.innerHeight, false);
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+resize();
+
+mount(CANDIDATES.find((k) => built[k]) || 'a');
+step(30);
+
+window.__MONSTER__ = {
+  THREE, scene, camera, renderer, built, mount, frameIt, setAnger, setMouth, step,
+  available: Object.keys(built),
+  say: (t) => { label.textContent = t; },
+  render: () => renderer.render(scene, camera),
+};
+window.__READY__ = true;
+</script>
+</body>
+</html>

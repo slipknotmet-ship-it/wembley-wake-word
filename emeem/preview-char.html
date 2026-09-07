@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Emeem - character preview</title>
+<style>
+  html, body { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#0b0510; }
+  #game-canvas { position:fixed; inset:0; width:100%; height:100%; display:block; }
+  #label {
+    position:fixed; left:0; right:0; bottom:0; padding:8px 14px; z-index:5;
+    font:600 15px/1.4 system-ui, sans-serif; color:#fff;
+    background:linear-gradient(transparent, rgba(0,0,0,.75)); text-shadow:0 1px 3px #000;
+  }
+</style>
+</head>
+<body>
+  <canvas id="game-canvas"></canvas>
+  <div id="label"></div>
+<script type="module">
+/**
+ * Dev-only harness: renderer + world + player (which owns the hand puppet).
+ * Lets the character be inspected and screenshotted before the monster,
+ * emeems, HUD and audio modules exist. Not part of the shipped build.
+ */
+import * as THREE from 'three';
+import { CONFIG } from './src/core/config.js';
+import { state } from './src/core/state.js';
+import { createBus } from './src/core/bus.js';
+import { createRenderer } from './src/engine/renderer.js';
+import { createWorld } from './src/world/world.js';
+import { createPlayer } from './src/entities/player.js';
+import { createEmeems } from './src/entities/emeem.js';
+
+const engine = createRenderer(document.getElementById('game-canvas'));
+const bus = createBus();
+const noop = () => {};
+const ctx = {
+  THREE, CONFIG, state, bus,
+  scene: engine.scene, camera: engine.camera, renderer: engine.renderer,
+  engine, world: null,
+  // Stubbed so anything that reaches for audio cannot take the preview down.
+  audio: { resume: noop, update: noop, collect: noop, jump: noop, land: noop,
+           roar: noop, levelup: noop, caught: noop },
+  addScore: (n = 1) => { state.score += n; },
+};
+ctx.world = createWorld(ctx);
+const player = createPlayer(ctx);
+const emeems = createEmeems(ctx);
+
+state.phase = 'playing';
+const label = document.getElementById('label');
+const FIXED = 1 / 120;
+let acc = 0;
+
+/** Camera override: when set, it is re-applied and re-rendered every frame. */
+let camOverride = null;
+
+function renderFrame() {
+  if (camOverride) {
+    engine.camera.position.set(...camOverride.pos);
+    engine.camera.lookAt(...camOverride.look);
+    if (camOverride.fov) { engine.camera.fov = camOverride.fov; engine.camera.updateProjectionMatrix(); }
+  }
+  engine.render();
+}
+
+/** Deterministic stepping - never reads the wall clock. */
+function step(frames = 1, dt = 1 / 60) {
+  for (let i = 0; i < frames; i++) {
+    state.time += dt; state.dt = dt;
+    acc += dt;
+    while (acc >= FIXED) { player.fixedUpdate(FIXED, ctx); acc -= FIXED; }
+    ctx.world.update(dt, ctx);
+    emeems.update(dt, ctx);
+    player.update(dt, ctx);
+    engine.update(dt, ctx);
+  }
+  renderFrame();
+}
+
+function setInput(x, z, jump = false) {
+  state.input.x = x; state.input.z = z;
+  if (jump && !state.input.jump) state.input.jumpPressed = true;
+  state.input.jump = jump;
+}
+
+function setTier(index) {
+  const lvl = CONFIG.levels[Math.max(0, Math.min(CONFIG.levels.length - 1, index))];
+  state.levelIndex = index; state.level = lvl; state.score = lvl.score;
+  ctx.world.reset();
+  emeems.reset();
+  state.dread = lvl.dread; engine.setDread(lvl.dread);
+}
+
+/** Point the camera at the hand from an arbitrary offset, for close-ups. */
+function orbit(dist, height, angleDeg, fov) {
+  const a = (angleDeg * Math.PI) / 180;
+  const p = state.player.pos;
+  camOverride = {
+    pos: [p.x + Math.sin(a) * dist, p.y + height, p.z + Math.cos(a) * dist],
+    look: [p.x, p.y + 0.45, p.z],
+    fov,
+  };
+  renderFrame();
+}
+/** Orbit an arbitrary world point, for framing something other than the hand. */
+function orbitAt(tx, ty, tz, dist, height, angleDeg, fov) {
+  const a = (angleDeg * Math.PI) / 180;
+  camOverride = {
+    pos: [tx + Math.sin(a) * dist, ty + height, tz + Math.cos(a) * dist],
+    look: [tx, ty, tz],
+    fov,
+  };
+  renderFrame();
+}
+
+/** World position of the emeem currently nearest the player, or null. */
+function nearestEmeemPos() {
+  return state.player.hasNearestEmeem ? state.player.nearestEmeem.clone() : null;
+}
+
+/**
+ * Freeze-frame a row of one emeem per available tone, for reviewing the palette.
+ * Reaches into the live pool and reuses one pooled mesh per distinct material
+ * rather than building its own, so what gets photographed is exactly what the
+ * game spawns. Nothing steps afterwards, so emeem.update() cannot move them.
+ */
+function toneBoard() {
+  const meshes = [];
+  emeems.group.traverse((o) => { if (o.isMesh && o.material) meshes.push(o); });
+  const byMat = new Map();
+  for (const m of meshes) if (!byMat.has(m.material.uuid)) byMat.set(m.material.uuid, m);
+  const picked = Array.from(byMat.values());
+
+  // Everything not in the row gets parked out of shot.
+  const keep = new Set(picked);
+  for (const m of meshes) if (!keep.has(m)) m.visible = false;
+  emeems.group.traverse((o) => { if (o.isSprite) o.visible = false; });
+
+  // Clean backdrop: the world is only scenery for this shot, and obstacles kept
+  // eclipsing the emeems at the ends of the row.
+  ctx.world.group.visible = false;
+  player.object3D.visible = false;
+
+  const p = state.player.pos;
+  const gap = 1.15;
+  const x0 = p.x - ((picked.length - 1) * gap) / 2;
+  picked.forEach((m, i) => {
+    m.visible = true;
+    m.position.set(x0 + i * gap, 1.15, p.z - 5.2);
+    m.quaternion.identity();
+    m.rotation.x = -0.42;   // tip the face toward the camera
+    m.scale.setScalar(1);
+  });
+
+  camOverride = { pos: [p.x, 1.95, p.z - 0.6], look: [p.x, 1.06, p.z - 5.2], fov: 52 };
+  renderFrame();
+  return picked.length;
+}
+
+function releaseCamera() { camOverride = null; engine.camera.fov = CONFIG.camera.fov; engine.camera.updateProjectionMatrix(); }
+
+function say(t) { label.textContent = t; }
+
+/**
+ * A stand-in emeem, so the reach-and-grab can be looked at before emeem.js
+ * exists. Also writes the nearest-emeem fields that entities/emeem.js will own,
+ * which is what actually drives the claw.
+ */
+let fakeEmeem = null;
+function showEmeem(offsetZ, offsetX = 0.25) {
+  if (!fakeEmeem) {
+    const geo = new THREE.SphereGeometry(CONFIG.emeem.radius, 22, 14);
+    geo.scale(1, 0.45, 1);
+    const mat = new THREE.MeshStandardMaterial({
+      color: CONFIG.palette.emeems[2], roughness: 0.18, metalness: 0.0,
+      emissive: CONFIG.palette.emeems[2], emissiveIntensity: 0.45,
+    });
+    fakeEmeem = new THREE.Mesh(geo, mat);
+    fakeEmeem.castShadow = true;
+    engine.scene.add(fakeEmeem);
+  }
+  const p = state.player.pos;
+  fakeEmeem.visible = true;
+  fakeEmeem.position.set(p.x + offsetX, CONFIG.emeem.hoverY, p.z - offsetZ);
+  state.player.hasNearestEmeem = true;
+  state.player.nearestEmeem.copy(fakeEmeem.position);
+  state.player.nearestEmeemDist = fakeEmeem.position.distanceTo(p);
+}
+function hideEmeem() {
+  if (fakeEmeem) fakeEmeem.visible = false;
+  state.player.hasNearestEmeem = false;
+  state.player.nearestEmeemDist = Infinity;
+}
+
+setTier(0);
+step(60);
+window.__PREVIEW__ = { ctx, state, engine, player, emeems, step, setInput, setTier, orbit, orbitAt, nearestEmeemPos, toneBoard, releaseCamera, say, CONFIG, renderFrame, showEmeem, hideEmeem };
+window.__READY__ = true;
+
+let last = performance.now();
+(function loop(now) {
+  requestAnimationFrame(loop);
+  const dt = Math.min((now - last) / 1000, 0.05); last = now;
+  if (window.__AUTOPLAY__ === false) { renderFrame(); return; } // keep the buffer fresh for screenshots
+  setInput(0, 1, false);
+  step(1, dt);
+})(last);
+</script>
+</body>
+</html>

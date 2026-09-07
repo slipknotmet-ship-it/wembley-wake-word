@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Emeem - world preview</title>
+<style>
+  html, body { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#0b0510; }
+  #game-canvas { position:fixed; inset:0; width:100%; height:100%; display:block; }
+  #label {
+    position:fixed; left:0; right:0; bottom:0; padding:8px 14px; z-index:5;
+    font:600 15px/1.4 system-ui, sans-serif; color:#fff;
+    background:linear-gradient(transparent, rgba(0,0,0,.75)); text-shadow:0 1px 3px #000;
+  }
+</style>
+</head>
+<body>
+  <canvas id="game-canvas"></canvas>
+  <div id="label"></div>
+<script type="module">
+/**
+ * Dev-only harness: boots ONLY renderer.js + world.js so the world can be
+ * looked at (and screenshotted) before the rest of the game exists.
+ * Not part of the shipped build - vite only bundles index.html.
+ */
+import { CONFIG } from './src/core/config.js';
+import { state } from './src/core/state.js';
+import { createBus } from './src/core/bus.js';
+import { createRenderer } from './src/engine/renderer.js';
+import { createWorld } from './src/world/world.js';
+
+const engine = createRenderer(document.getElementById('game-canvas'));
+const bus = createBus();
+const ctx = {
+  THREE: null, CONFIG, state, bus,
+  scene: engine.scene, camera: engine.camera, renderer: engine.renderer,
+  engine, world: null, audio: null, addScore: () => {},
+};
+ctx.world = createWorld(ctx);
+
+state.phase = 'playing';
+const label = document.getElementById('label');
+
+/** Advance the simulation deterministically, ignoring wall-clock entirely. */
+function step(frames = 1, dt = 1 / 60, driftZ = 0) {
+  for (let i = 0; i < frames; i++) {
+    state.time += dt;
+    state.dt = dt;
+    state.player.pos.z -= driftZ * dt;
+    ctx.world.update(dt, ctx);
+    engine.update(dt, ctx);
+  }
+  engine.render();
+}
+
+/**
+ * Jump straight to a threat tier: sets the level (which the world reads for
+ * obstacle density) and settles the dread smoothing, then rebuilds the world
+ * so chunks are generated at the NEW density rather than the old one.
+ */
+function setTier(index, { rebuild = true } = {}) {
+  const lvl = CONFIG.levels[Math.max(0, Math.min(CONFIG.levels.length - 1, index))];
+  state.levelIndex = index;
+  state.level = lvl;
+  state.score = lvl.score;
+  if (rebuild) { ctx.world.reset(); state.player.pos.set(0, CONFIG.player.spawnHeight, 0); }
+  state.dread = lvl.dread;            // skip the smoothing ramp
+  engine.setDread(lvl.dread);
+  step(90);                           // let chunks stream and the camera settle
+  label.textContent =
+    `Tier ${index} - ${lvl.name}   |   monster ${lvl.speed} m/s, x${lvl.scale} size   |   ` +
+    `dread ${lvl.dread.toFixed(2)}   |   ${ctx.world.colliders.length} colliders live`;
+  return { tier: index, name: lvl.name, colliders: ctx.world.colliders.length };
+}
+
+setTier(0);
+window.__PREVIEW__ = { ctx, state, engine, step, setTier, CONFIG };
+window.__READY__ = true;
+
+// Keep it live so it is also usable by hand in a browser.
+let last = performance.now();
+(function loop(now) {
+  requestAnimationFrame(loop);
+  const dt = Math.min((now - last) / 1000, 0.05); last = now;
+  if (window.__AUTOPLAY__ !== false) { state.player.pos.z -= 6 * dt; step(1, dt); }
+})(last);
+</script>
+</body>
+</html>
