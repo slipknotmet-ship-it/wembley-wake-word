@@ -71,15 +71,78 @@ export const CONFIG = {
     viewChunks: 3,         // chunk radius streamed around the player
     groundY: 0,
     // Obstacle density ramps with the threat level (see levels below).
-    obstaclesPerChunkBase: 7,
-    obstaclesPerChunkPerLevel: 2.6,
-    obstaclesPerChunkMax: 26,
+    // The COLLIDER-BEARING budget. Raised because the near field was measurably
+    // empty: the visible ground inside 15m of the player is 131 m^2, and at the
+    // old density of 7 props per 32m chunk (0.006836/m^2) that is 0.90 props
+    // TOTAL - less than one object. That is the "lawn" complaint, quantified.
+    // Raising this alone cannot fix it (8 objects in 131 m^2 needs 63 props per
+    // chunk, which would be a maze), so the fill comes from the collider-free
+    // scatter pass below and this budget only has to stop the near field being
+    // literally bare.
+    obstaclesPerChunkBase: 11,
+    obstaclesPerChunkPerLevel: 3.0,
+    obstaclesPerChunkMax: 34,
     /**
      * Relative mix of forest props. Trees are the tall things you must go
      * around, rocks the low things you can hop, bushes the soft clutter that
      * breaks up sightlines without ever blocking a route.
      */
-    propMix: { tree: 0.44, rock: 0.26, bush: 0.30 },
+    propMix: { tree: 0.30, rock: 0.42, bush: 0.28 },
+    /**
+     * Collider-free clutter, per chunk, level-independent. Pebbles and ferns
+     * merged into the SAME stone/foliage buffers as everything else, so they
+     * cost triangles and no draw calls. This is what actually fills the near
+     * field: 36 per chunk is 0.035/m^2, about 4.6 in the visible 131 m^2,
+     * against 0.90 before.
+     */
+    scatterPerChunk: 36,
+    /**
+     * Rocks come in three jobs and a rock's SIZE tells you which.
+     *
+     * COBBLE   - clutter, and NO collider: every height under the player's
+     *            0.35m STEP_HEIGHT makes step-up teleport the hand up to 32cm
+     *            in a single 8.3ms frame while the camera lags at followLerp
+     *            6.5. That is the bob-up-and-over placeBush already refuses.
+     * SLAB     - the platform. Landable from flat ground.
+     * BLOCK    - the climb. NEVER landable from the ground (see rockHopCeiling),
+     *            only from a slab, and wide enough that the landing is forgiving.
+     */
+    rock: {
+      cobble: { share: 0.30, h: [0.16, 0.32], r: [0.34, 0.92] },
+      slab:   { share: 0.46, h: [0.55, 1.40], r: [1.05, 1.75] },
+      block:  { share: 0.24, h: [1.75, 2.30], r: [1.22, 1.60] },
+    },
+    /**
+     * THE REAL HOP CEILING, and it is not JUMP_APEX.
+     *
+     * The 120Hz step integrates velocity first, so the discrete apex overshoots
+     * the continuous v^2/2g by exactly v0*dt/2 = 8.4/240 = 0.035m: 1.505m, not
+     * 1.470m, reached at step 42. Verified by running the real integrator.
+     *
+     * What actually decides whether you land ON a ledge rather than bump into
+     * it is the horizontal query's SKIN: fillHorizontalBox sets min.y = wy +
+     * 0.02, and queryAABB drops a box whose max.y is below that. So a ledge of
+     * top T goes transparent - you sail over it - exactly when T < wy + 0.02,
+     * and the largest wy a horizontal pass ever sees is the apex. Hence:
+     *
+     *     T < 1.505 + 0.02 = 1.525m
+     *
+     * A slab tops out at 1.40 (0.125 of margin), a block starts at 1.75 (0.225
+     * of margin) so no floating-point edge can ever make one hoppable off flat
+     * ground.
+     */
+    rockHopCeiling: 1.525,
+    /**
+     * Exponent of a symmetric U-shaped draw inside a class band. Below 1 pushes
+     * rolls to the ENDS, so a rock is decidedly small or decidedly big and the
+     * middling ones you cannot read at a glance are rare.
+     * P(middle third) = 3^(-1/spread) = 13.6% against a uniform 33.3%.
+     */
+    rockSizeSpread: 0.55,
+    /** Fraction of slabs that get a bush growing out of the top. */
+    hummockShare: 0.30,
+    /** Fraction of slabs that emit a deliberate block partner to climb onto. */
+    stackShare: 0.34,
     obstacleMinSize: 1.1,
     obstacleMaxSize: 4.2,
     obstacleMaxHeight: 6.0,
@@ -133,6 +196,13 @@ export const CONFIG = {
     // (which stands at 0.615m) and the claw had to reach upward, which read as
     // swatting rather than pinching.
     hoverY: 0.34,
+    /**
+     * Fraction of ordinary emeems that spawn ON TOP of a prop instead of on the
+     * ground. Slabs and blocks only - a cobble carries no collider and a trunk
+     * collider runs the tree's whole 8-11m, so both are excluded for free by
+     * the perch height test rather than by a special case.
+     */
+    perchShare: 0.22,
     magnetRadius: 2.4,     // emeems drift toward you inside this radius
     magnetStrength: 7.0,
     respawnDelay: 0.6,

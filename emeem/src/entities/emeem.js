@@ -366,6 +366,15 @@ const AMAAM_MIN_SPAWN_R = 11;
  * lingers behind you for a few seconds instead of blinking out on screen.
  */
 const DESPAWN_R = RING_MAX + 25;
+
+/**
+ * Fraction of ordinary emeems that spawn on top of a prop. Runners are excluded
+ * because they move, and amaams because a hazard you have to climb to reach is
+ * a hazard you will never take by accident.
+ */
+const PERCH_SHARE = num(E.perchShare, 0.22);
+/** Scratch for world.pickPerch, so a spawn attempt allocates nothing. */
+const _perch = { x: 0, y: 0, z: 0 };
 const DESPAWN_R2 = DESPAWN_R * DESPAWN_R;
 
 /**
@@ -687,6 +696,10 @@ export function createEmeems(ctx) {
       phase: 0,
       colorIndex: ci,
       respawnAt: 0,
+      // Height of the prop top this one sits on, or 0 for an ordinary ground
+      // spawn. Set on every activate path so a recycled entry can never keep a
+      // stale perch and hover over open grass.
+      perchY: 0,
       pop: 0,          // > 0 while playing the collect animation: drawn, not collectable
       listIdx: -1,     // slot in amaamList, or -1
       // runner-only state, inert for the still kinds
@@ -817,7 +830,26 @@ export function createEmeems(ctx) {
   function deactivate(e) {
     if (e.active) activeCount--;
     e.active = false;
+    e.perchY = 0;
     amaamRemove(e);
+  }
+
+  /**
+   * Is a live prize already sitting within a metre of this spot? Two prizes on
+   * the same rock top would be collected by one pass of the hand, which reads
+   * as one of them evaporating - and emeem.js has no prize-vs-prize keep-out
+   * anywhere else, because on open ground the ring sampling makes a collision
+   * vanishingly unlikely. A perch is a handful of square metres, so it does not.
+   */
+  function prizeTaken(x, z) {
+    for (let i = 0; i < pool.length; i++) {
+      const o = pool[i];
+      if (!o.active || !o.kind.prize) continue;
+      const dx = o.basePos.x - x;
+      const dz = o.basePos.z - z;
+      if (dx * dx + dz * dz < 1.0) return true;
+    }
+    return false;
   }
 
   /** Returns an entry to the pool immediately (out of range, or reset). */
@@ -903,12 +935,37 @@ export function createEmeems(ctx) {
 
       const kind = pickKind(r);
       if (nearAmaam(x, z, kind)) continue;
+
+      // --- perched: sit this one on top of a rock instead of on the ground.
+      //
+      // activate()'s third argument is already documented as "the surface this
+      // thing sits on", not "the ground", so handing it a collider top is all a
+      // perch needs - no signature changes anywhere.
+      //
+      // blockedAt MUST be skipped on this path, and that is the single gate
+      // between the old code and this feature: it is a 0.77m XZ keep-out around
+      // every collider whose Y range always overlaps a ground-anchored box, so
+      // it is effectively a 2-D test and would reject every perch by
+      // construction - the prize is meant to be ON the prop.
+      if (kind === EMEEM && world && world.pickPerch && Math.random() < PERCH_SHARE) {
+        if (world.pickPerch(px, pz, RING_MIN, RING_MAX, prizeTaken, _perch)) {
+          const pdx = _perch.x - mx;
+          const pdz = _perch.z - mz;
+          if (pdx * pdx + pdz * pdz >= monsterKeepOut2 && !nearAmaam(_perch.x, _perch.z, kind)) {
+            activate(e, kind, _perch.x, _perch.y, _perch.z);
+            e.perchY = _perch.y;
+            return true;
+          }
+        }
+      }
+
       // Swept volume of the hovering, bobbing collectible. Anything overlapping
       // it means this one would be embedded in a prop and unreachable.
       if (blockedAt(world, x, z, kind)) continue;
 
       const gy = world ? world.sampleGroundY(x, z) : CONFIG.world.groundY;
       activate(e, kind, x, gy, z);
+      e.perchY = 0;
       return true;
     }
     return false;
