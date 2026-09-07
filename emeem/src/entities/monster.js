@@ -348,6 +348,20 @@ export function createMonster(ctx) {
   /** True while the golden slow is running, so its onset can be detected. */
   let slowActive = false;
 
+  /**
+   * Duty cycle of obstacleSlowdown: how often the creature is actually braked
+   * to 55% by the world it is running through.
+   *
+   * This is not a curiosity. It sets the CEILING on any water "slow": open
+   * water has no colliders at all, so the creature there runs a perfectly
+   * straight line at its full target speed, while on land it pays this tax with
+   * probability p. A swim multiplier above (1 - 0.45p) would therefore make it
+   * FASTER in the lake than out of it, inverting the whole feature. Measured
+   * per tier by tools/scrape.mjs.
+   */
+  let scrapeSteps = 0;
+  let scrapeHits = 0;
+
   // Rolled once per run. The construction-time placement and the FIRST run
   // deliberately share a roll, so pressing PLAY never pops the Protector from
   // one shoulder to the other; every restart re-rolls.
@@ -610,8 +624,10 @@ export function createMonster(ctx) {
     // Clamping the threshold to the probe means an unobstructed line always
     // scores exactly at it, so only a real hit can come in under.
     const scrapeDist = Math.min(r * SCRAPE_RADII, probeLen);
+    scrapeSteps++;
     if (scraping || directClear < scrapeDist || clearAhead < scrapeDist) {
       speed *= M.obstacleSlowdown;
+      scrapeHits++;
     }
 
     const fx = -Math.sin(heading);
@@ -805,5 +821,13 @@ export function createMonster(ctx) {
     group.scale.setScalar(m.scale);
   }
 
-  return { group, fixedUpdate, update, reset };
+  return {
+    group, fixedUpdate, update, reset,
+    /** Diagnostics: obstacleSlowdown duty cycle since the last read. */
+    scrapeStats(reset) {
+      const out = { steps: scrapeSteps, hits: scrapeHits, p: scrapeSteps ? scrapeHits / scrapeSteps : 0 };
+      if (reset) { scrapeSteps = 0; scrapeHits = 0; }
+      return out;
+    },
+  };
 }
