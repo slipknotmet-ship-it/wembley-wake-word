@@ -308,7 +308,7 @@ export function createMonster(ctx) {
   face.group.traverse((o) => o.layers.enable(PORTRAIT_LAYER));
   if (ctx.engine && ctx.engine.setPortraitSubject) {
     // Aim at the sunglasses, which sit at chest height and ARE its eyes.
-    ctx.engine.setPortraitSubject(face.group, { height: 2.55 });
+    ctx.engine.setPortraitSubject(face.group, { height: 2.46, dist: 4.35, lift: 0.15 });
   }
   // main.js never adds entity groups itself. ctx.scene is live at construction
   // time; ctx.world and ctx.audio are NOT, so nothing below may touch them

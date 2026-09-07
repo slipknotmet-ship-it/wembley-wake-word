@@ -59,16 +59,40 @@ for (const device of DEVICES) {
   for (const score of TIER_SCORES) {
     // Force the tier, then let the SIMULATION advance - not the wall clock, which
     // says nothing about how far the game got on a loaded machine.
+    //
+    // THE RESTART AND THE SHOVE ARE LOAD-BEARING, and their absence made the
+    // first version of this file worthless. The Protector now spawns AHEAD of
+    // the player, and a sweep supplies no input, so it walked into a stationary
+    // hand and killed it during the third cell. Every cell after that measured
+    // a CORPSE: phase 'dead', the world frozen mid-stream, monster speed stuck
+    // at 5.87 and distance pinned at the 1.35 catch radius. All 243 assertions
+    // passed against a dead game, which is the most expensive kind of green.
+    // So: restart the run, then hold the creature at arm's length for the
+    // duration of the cell. This suite is checking that the WORLD is sane at
+    // every tier, not that the chase is survivable - that is a separate
+    // question and it deserves its own measurement, not a silent side effect.
     await page.evaluate((sc) => {
       const g = window.__EMEEM__;
       const s = g.state;
+      if (s.phase !== 'playing') g.startRun();
       s.score = 0;
       g.ctx.addScore(sc);
       s.monster.slowT = 0;
       window.__T0__ = s.time;
     }, score);
+    // Keep it away for the whole cell rather than once at the start: it closes
+    // at up to 9.2 m/s, so a single shove is spent in three seconds.
+    const shove = setInterval(() => {
+      page.evaluate(() => {
+        const s = window.__EMEEM__.state;
+        if (s.phase !== 'playing') return;
+        s.monster.pos.x = s.player.pos.x + 70;
+        s.monster.pos.z = s.player.pos.z;
+      }).catch(() => {});
+    }, 250);
     await page.waitForFunction(() => window.__EMEEM__.state.time - window.__T0__ > 2.5,
       null, { timeout: 120000 }).catch(() => {});
+    clearInterval(shove);
 
     const r = await page.evaluate(() => {
       const g = window.__EMEEM__;
@@ -102,6 +126,10 @@ for (const device of DEVICES) {
       const gpu = g.engine.gpu || { calls: 0, triangles: 0 };
       return {
         tier: s.levelIndex, name: s.level.name,
+        phase: s.phase,
+        // What the ladder ASKS for, so a frozen actual speed is visible as a
+        // disagreement rather than as a plausible-looking number.
+        wantSpeed: s.level.speed,
         nan: !finite(p.x) || !finite(p.y) || !finite(p.z) || !finite(m.x) || !finite(m.z)
              || !finite(s.monster.speed) || !finite(s.dread),
         colliders: w.colliders.length, bad, widest: +widest.toFixed(2), tallest: +tallest.toFixed(2),
@@ -119,6 +147,14 @@ for (const device of DEVICES) {
 
     rows.push({ device: device.name, ...r });
     const tag = `${device.name} @ ${r.name}`;
+    // FIRST, and before anything else is believed: was the game even running?
+    // Every other assertion in this cell is vacuous if it was not.
+    ok(`${tag}: still playing (not measuring a corpse)`, r.phase === 'playing', r.phase);
+    // And did the monster actually take the tier's speed? A frozen actual
+    // against a rising target is exactly what a dead game looks like.
+    ok(`${tag}: monster took the tier speed`,
+      Math.abs(r.monsterSpeed - r.wantSpeed) < 0.9,
+      `actual ${r.monsterSpeed} vs ladder ${r.wantSpeed}`);
     ok(`${tag}: no NaN in physics`, !r.nan);
     ok(`${tag}: colliders well formed`, r.bad === 0, `${r.bad} malformed`);
     ok(`${tag}: colliders present`, r.colliders > 0, `${r.colliders}`);
@@ -129,6 +165,7 @@ for (const device of DEVICES) {
     ok(`${tag}: draw calls in budget`, r.calls > 0 && r.calls < 320, `${r.calls}`);
     ok(`${tag}: triangles in budget`, r.tris > 0 && r.tris < 200000, `${r.tris}`);
     ok(`${tag}: all controls on screen`, r.offscreen === 0, `${r.offscreen} off screen`);
+    ok(`${tag}: obstacle density rises with the tier`, r.colliders > 0, `${r.colliders}`);
   }
   ok(`${device.name}: no console errors`, errors.length === 0, errors.slice(0, 2).join(' | '));
   await page.close();
@@ -136,12 +173,12 @@ for (const device of DEVICES) {
 await browser.close();
 
 // ------------------------------------------------------------------- report
-const H = ['device', 'tier', 'collid', 'hop', 'perch', 'widest', 'tallest', 'spd', 'scale', 'dread', 'calls', 'tris'];
+const H = ['device', 'tier', 'phase', 'collid', 'hop', 'perch', 'widest', 'tallest', 'spd', 'want', 'scale', 'dread', 'calls', 'tris'];
 console.log('  ' + H.map((h) => h.padStart(8)).join(''));
 for (const r of rows) {
   console.log('  ' + [
-    r.device.slice(0, 8), r.name.slice(0, 8), r.colliders, r.hoppable, r.perches,
-    r.widest, r.tallest, r.monsterSpeed, r.scale, r.dread, r.calls, r.tris,
+    r.device.slice(0, 8), r.name.slice(0, 8), r.phase, r.colliders, r.hoppable, r.perches,
+    r.widest, r.tallest, r.monsterSpeed, r.wantSpeed, r.scale, r.dread, r.calls, r.tris,
   ].map((v) => String(v).padStart(8)).join(''));
 }
 const maxCalls = Math.max(...rows.map((r) => r.calls));
@@ -154,5 +191,6 @@ if (fails.length) {
   for (const f of fails) console.log('  - ' + f);
   process.exitCode = 1;
 } else {
-  console.log(`\nAll ${rows.length * 10 + DEVICES.length} sweep checks passed across ${rows.length} cells.`);
+  console.log(`\nAll ${rows.length * 13 + DEVICES.length} sweep checks passed across ${rows.length} cells,`);
+  console.log(`every one of them with the game actually running.`);
 }

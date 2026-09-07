@@ -485,8 +485,22 @@ export function createRenderer(canvasEl) {
    * @param {THREE.Object3D|null} obj the thing to frame
    * @param {object} [opts] { height } metres above the subject origin to aim at
    */
+  /**
+   * @param {THREE.Object3D|null} obj  the thing to frame
+   * @param {{height?:number, dist?:number, lift?:number}} [opts]
+   *   height - metres above the subject's own origin to aim at
+   *   dist   - metres to stand back. Bigger fits more in.
+   *   lift   - metres the camera rides above the aim point.
+   * All three are in the subject's UNSCALED space and are multiplied by the
+   * rig's scale at render time, so the framing holds as the creature grows.
+   */
   function setPortraitSubject(obj, opts) {
-    portraitSubject = obj ? { obj, height: (opts && opts.height) || 2.9 } : null;
+    portraitSubject = obj ? {
+      obj,
+      height: (opts && opts.height) || 2.9,
+      dist: (opts && opts.dist) || 3.1,
+      lift: (opts && opts.lift !== undefined) ? opts.lift : 0.30,
+    } : null;
   }
 
   /** @param {object|null} rect { x, y, w, h } in CSS pixels, or null to hide. */
@@ -507,13 +521,13 @@ export function createRenderer(canvasEl) {
     // Its face is on its chest, so aim at chest height and stand in FRONT of
     // it - the creature faces -Z in its own frame, rotated by its yaw.
     _pSubject.y += portraitSubject.height * scl;
-    const dist = 3.1 * scl;
+    const dist = portraitSubject.dist * scl;
     // Stand three-quarters rather than dead-on, biased toward the side the sun
     // comes from. Straight in front of its face is straight into its shadow -
     // the sun is behind the player, so a head-on portrait is backlit and the
     // whole face reads as a black rectangle with two eyes floating in it.
     const az = yaw + PORTRAIT_AZIMUTH;
-    _pOffset.set(-Math.sin(az) * dist, 0.30 * scl, -Math.cos(az) * dist);
+    _pOffset.set(-Math.sin(az) * dist, portraitSubject.lift * scl, -Math.cos(az) * dist);
     portraitCam.position.copy(_pSubject).add(_pOffset);
     portraitCam.lookAt(_pSubject);
 
