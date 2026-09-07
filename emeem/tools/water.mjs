@@ -205,6 +205,31 @@ const profile = await page.evaluate(() => {
   }
   return { wet, dry, runs };
 });
+// THE SHORELINE MUST NOT BE STRAIGHT. A rectangle seen from a camera that never
+// rotates draws a dead horizontal line across the whole screen, and that is what
+// the first build of this lake looked like. Walk the near waterline across the
+// visible width and check it actually moves.
+const shore = await page.evaluate(() => {
+  const w = window.__EMEEM__.world;
+  const zs = [];
+  for (let x = -60; x <= 60; x += 4) {
+    // bisect for the waterline on this column of the first lake
+    let lo = -456, hi = -300;
+    for (let i = 0; i < 40; i++) {
+      const mid = (lo + hi) / 2;
+      if (w.waterAt(x, mid) > 0) lo = mid; else hi = mid;
+    }
+    zs.push(lo);
+  }
+  return { min: Math.min(...zs), max: Math.max(...zs), n: zs.length };
+});
+ok('the shoreline bends instead of ruling a straight line',
+  shore.max - shore.min > 4,
+  `${(shore.max - shore.min).toFixed(1)}m of wander across 120m of shore`);
+ok('but it stays a shoreline, not a fjord',
+  shore.max - shore.min < 16,
+  `${(shore.max - shore.min).toFixed(1)}m`);
+
 ok('four lakes in the first 3.6km, one per 1024m', profile.runs === 4, `${profile.runs} stretches of water`);
 ok('water stays a small fraction of the walk', profile.wet / (profile.wet + profile.dry) < 0.10,
   `${(100 * profile.wet / (profile.wet + profile.dry)).toFixed(1)}% wet`);
@@ -245,9 +270,20 @@ for (const n of [1, 2]) {
     here.water ? `visible=${here.water.visible} at (${here.water.x}, ${here.water.z})` : 'no water mesh');
   ok(`lake ${n}: three boats re-moored here`, here.boats.length === 3,
     here.boats.map((b) => `(${b.x},${b.z})`).join(' '));
-  ok(`lake ${n}: and on this lake's near shore, not the last one's`,
-    here.boats.length === 3 && here.boats.every((b) => Math.abs(b.z - (cz + 34)) < 1.5),
-    here.boats.map((b) => b.z).join(','));
+  // Not a magic z. The shoreline bends with x (shoreWarp), so "34m from the
+  // centre" stopped being true the moment the lake stopped being a rectangle -
+  // and a test that pins a number the design deliberately varies fails for the
+  // wrong reason. Assert the CONTRACT: every boat floats, and every boat has
+  // dry land close behind it, which is what "moored on the near shore" means.
+  const mooring = await page.evaluate((bs) => {
+    const w = window.__EMEEM__.world;
+    return bs.map((b) => ({ x: b.x, z: b.z, wet: +w.waterAt(b.x, b.z).toFixed(2), behind: +w.waterAt(b.x, b.z + 3).toFixed(2) }));
+  }, here.boats);
+  ok(`lake ${n}: every boat is afloat`, mooring.every((m) => m.wet > 0),
+    mooring.map((m) => m.wet).join(', '));
+  ok(`lake ${n}: and moored on the shore, not out in the middle`,
+    mooring.every((m) => m.wet < 0.4 && m.behind === 0),
+    mooring.map((m) => `${m.wet}/${m.behind}`).join(' '));
   ok(`lake ${n}: nothing stands in the water`, here.inWater === 0, `${here.inWater} of ${here.total} nearby colliders`);
 
   await page.evaluate(([x, z]) => { window.__EMEEM__.state.player.pos.set(x, 0, z + 35); }, [cx, cz]);
@@ -261,20 +297,26 @@ for (const n of [1, 2]) {
   // a trap. The loop also stops on a dead run, so this can never grade a corpse.
   await page.evaluate(() => { const i = window.__EMEEM__.state.input; i.z = 1; i.x = 0; });
   const t0 = await page.evaluate(() => window.__EMEEM__.state.time);
+  // "Past the far shore" is asked of the FIELD, not of a constant: the shore
+  // bends, so the crossing on this line is not 72m and no fixed number is the
+  // right one. Dry ground, moving away from the lake, is the whole condition.
   const reached = await page.waitForFunction((z) => {
     const E = window.__EMEEM__;
-    return E.state.player.pos.z < z - 36 || E.state.player.hull <= 0 || E.state.phase !== 'playing';
+    const p = E.state.player.pos;
+    return (p.z < z && E.world.waterAt(p.x, p.z) === 0)
+      || E.state.player.hull <= 0 || E.state.phase !== 'playing';
   }, cz, { timeout: 300000, polling: 50 }).then(() => true).catch(() => false);
   const land = await page.evaluate(([z, t]) => {
     const E = window.__EMEEM__;
-    return { z: E.state.player.pos.z, hull: E.state.player.hull, secs: E.state.time - t,
-             past: E.state.player.pos.z < z - 36, phase: E.state.phase };
+    const p = E.state.player.pos;
+    return { z: p.z, hull: E.state.player.hull, secs: E.state.time - t,
+             past: p.z < z && E.world.waterAt(p.x, p.z) === 0, phase: E.state.phase };
   }, [cz, t0]);
   await page.evaluate(() => { const i = window.__EMEEM__.state.input; i.z = 0; i.x = 0; });
 
   ok(`lake ${n}: the crossing measured a LIVE game`, land.phase === 'playing', land.phase);
   ok(`lake ${n}: the boat reaches the far shore`, reached && land.past,
-    `z = ${land.z.toFixed(1)}, far shore at ${cz - 36}, took ${land.secs.toFixed(1)}s`);
+    `dry land at z = ${land.z.toFixed(1)}, ${(Math.abs(land.z - cz)).toFixed(1)}m past the centre, took ${land.secs.toFixed(1)}s`);
   ok(`lake ${n}: the crossing costs most of a hull, not all of it`,
     land.hull > 0.05 && land.hull < 0.60,
     `${(100 * land.hull).toFixed(0)}% hull left`);
