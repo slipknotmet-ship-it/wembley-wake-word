@@ -183,6 +183,16 @@ const CSS = `
   --${PRE}-j:104px;           /* jump disc diameter */
   --${PRE}-edge:18px;         /* inset from the safe-area edges */
   --${PRE}-bw:2px;            /* button border - the hit-collar maths needs it */
+  /* Resting translucency lives in the FILL AND BORDER ALPHAS, never in an
+     an opacity on the button. opacity composites the whole subtree, so it fades
+     the glyph with the chip - the arrow ends up at icon-alpha * chip-opacity
+     and the thing you actually need to read goes soft along with the thing you
+     wanted to get out of the way. Alpha on background-color and border-color
+     makes the CHIP see-through and leaves the arrow at full strength. */
+  --${PRE}-fill:rgba(14,9,22,.17);        /* cardinal chip */
+  --${PRE}-rim:rgba(255,255,255,.32);
+  --${PRE}-fill-d:rgba(14,9,22,.12);      /* diagonals, one step quieter */
+  --${PRE}-rim-d:rgba(255,255,255,.22);
   opacity:1; visibility:visible;
   transition:opacity 170ms ease;
   touch-action:none;
@@ -231,12 +241,15 @@ const CSS = `
   /* Dark translucent, not light: the world behind runs from a bright blue sky
      at level 0 to near-black at THE END, and a dark chip with a white rim is
      the only fill that stays legible across both ends of that ramp. */
-  background:rgba(16,10,24,.32);
-  border:var(--${PRE}-bw) solid rgba(255,255,255,.5);
-  border-radius:20px;
+  background:var(--${PRE}-fill);
+  border:var(--${PRE}-bw) solid var(--${PRE}-rim);
+  /* A softer corner than the 20px this used to carry. At 76px the chip reads as
+     a squircle rather than a rounded box, which sits better under a thumb and
+     stops eight of them looking like a keypad. */
+  border-radius:26px;
   /* Static shadow, never animated: it lifts the chip off the bright level-0
      grass, where a flat translucent square otherwise dissolves into the world. */
-  box-shadow:0 2px 10px rgba(0,0,0,.32);
+  box-shadow:0 2px 9px rgba(0,0,0,.22);
   transition:background-color 70ms linear,border-color 70ms linear,transform 70ms ease;
   will-change:transform;
 }
@@ -255,7 +268,9 @@ const CSS = `
   inset:calc(-1 * (var(--${PRE}-pad) + var(--${PRE}-bw)));
 }
 .${PRE}-btn.${PRE}-down{
-  background:rgba(255,255,255,.9);
+  /* The chip is barely there at rest precisely so that this reads as a jump
+     rather than a tint. */
+  background:rgba(255,255,255,.92);
   border-color:#fff;
   transform:scale(.93);
 }
@@ -264,7 +279,7 @@ const CSS = `
 .${PRE}-btn.${PRE}-down .${PRE}-ico{ fill:#140c1e; opacity:1; }
 /* No drop-shadow/backdrop filter on the glyph on purpose: the button scales on
    press, and a filtered child forces a re-raster on every step of that tween. */
-.${PRE}-ico{ width:46%; height:46%; fill:#fff; opacity:.95; }
+.${PRE}-ico{ width:46%; height:46%; fill:#fff; opacity:1; }
 
 ${ARROW_CSS}
 
@@ -276,11 +291,11 @@ ${ARROW_CSS}
    getBoundingClientRect() to 64.6px (52.7px shrunk), which breaks both the
    62px floor the stress suite asserts and every cached zone in measure(). */
 .${PRE}-btn.${PRE}-diag:not(.${PRE}-down){
-  background:rgba(16,10,24,.24);
-  border-color:rgba(255,255,255,.34);
+  background:var(--${PRE}-fill-d);
+  border-color:var(--${PRE}-rim-d);
 }
 .${PRE}-btn.${PRE}-diag .${PRE}-ico{ width:42%; height:42%; }
-.${PRE}-btn.${PRE}-diag:not(.${PRE}-down) .${PRE}-ico{ opacity:.9; }
+.${PRE}-btn.${PRE}-diag:not(.${PRE}-down) .${PRE}-ico{ opacity:.82; }
 
 .${PRE}-jump{
   position:absolute;
@@ -290,8 +305,10 @@ ${ARROW_CSS}
   border-radius:50%;
   flex-direction:column; gap:3px;
   --${PRE}-pad:${JUMP_PAD}px;
-  background:rgba(38,20,4,.38);
-  border-color:rgba(255,206,110,.72);
+  /* A touch stronger than the arrows: missing an arrow costs a step, missing
+     the jump costs the run, so it stays the more visible of the two. */
+  background:rgba(38,20,4,.26);
+  border-color:rgba(255,206,110,.66);
   color:#ffd88a;
 }
 .${PRE}-jump .${PRE}-ico{ width:30%; height:30%; fill:#ffd88a; }
