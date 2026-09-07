@@ -2,26 +2,44 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 
 /**
- * EMEEM - infinite streaming world.
+ * EMEEM - infinite streaming FOREST.
  *
- * The world is an endless flat plane (y = CONFIG.world.groundY) littered with
- * axis-aligned boxes. It is diced into `chunkSize` metre squares; the chunks
- * inside `viewChunks` of the player exist, everything else is thrown away.
+ * The world is an endless flat plane (y = CONFIG.world.groundY) planted with
+ * three kinds of prop, mixed by CONFIG.world.propMix:
  *
- * Three things matter here and they all pull in the same direction:
+ *   TREE  - a leaning trunk under a clump of canopy blobs. The tall thing you
+ *           run AROUND. Blocks you at the trunk only (see COLLISION below).
+ *   ROCK  - a low, jitter-faceted boulder you can hop onto with the jump
+ *           button. Its collider top is exactly its visible top.
+ *   BUSH  - a low clump of foliage. Soft clutter that breaks sightlines and
+ *           never, ever stops you. It has NO collider at all.
+ *
+ * It is diced into `chunkSize` metre squares; the chunks inside `viewChunks`
+ * of the player exist, everything else is thrown away.
+ *
+ * Four things matter here and they all pull in the same direction:
  *
  *  1. DETERMINISM. A chunk's layout comes from mulberry32 seeded by a hash of
  *     (cx, cz), never Math.random, so walking back into a chunk you unloaded
- *     five seconds ago gives you the identical rocks in the identical places.
+ *     five seconds ago gives you the identical forest in the identical places.
+ *     Every prop's rng draws depend only on its own rolls, and the obstacle
+ *     COUNT is drawn first and always costs exactly one draw, so raising the
+ *     threat level can only ADD props - the ones already there never move.
  *
- *  2. DRAW CALLS. Every box in a chunk is merged into a single BufferGeometry
- *     sharing one material, so 49 live chunks cost 49 draw calls instead of
- *     the ~1000 that one-mesh-per-box would cost. That difference is the whole
- *     ballgame on a phone.
+ *  2. DRAW CALLS. A chunk's props are merged into at most THREE geometries -
+ *     one per shared material (bark, foliage, stone) - so 49 live chunks cost
+ *     ~147 draw calls instead of the several thousand that one-mesh-per-prop
+ *     would cost. That difference is the whole ballgame on a phone.
  *
- *  3. NO PER-FRAME ALLOCATION. queryAABB is called twice per fixed step (120Hz)
- *     by the player and the monster. It buckets colliders by chunk and refills
- *     a caller-owned array, so the hot path allocates nothing at all.
+ *  3. NO PER-FRAME ALLOCATION. queryAABB is called several times per fixed
+ *     step (120Hz) by the player and the monster. It buckets colliders by
+ *     chunk and refills a caller-owned array, so the hot path allocates
+ *     nothing at all. Every scratch object here is hoisted to module scope.
+ *
+ *  4. COLLISION THAT MATCHES THE SILHOUETTE. See placeTree/placeRock/placeBush.
+ *     The single worst thing a forest can do to a chase game is put invisible
+ *     walls between the trees, so a tree blocks you at its TRUNK and a canopy
+ *     four metres wide costs you nothing but shade.
  */
 
 // ---------------------------------------------------------------- constants
@@ -32,18 +50,34 @@ const MAX_BUILDS_PER_FRAME = 2;
 /** Radius (in chunks) built synchronously on reset so the first frame isn't bare. */
 const PRIME_RADIUS = 2;
 
-/** Boxes sink this far below the ground plane so their bottom face never z-fights it. */
-const BOX_SINK = 0.08;
+/** Trunks sink this far below the ground plane so their open base never shows. */
+const TRUNK_SINK = 0.12;
 
 /** Vertical shading baked into vertex colours: dark at the base, full at the top. */
 const SHADE_BOTTOM = 0.74;
 const SHADE_TOP = 1.06;
 
-/** Minimum gap enforced between two boxes in a chunk so clutter doesn't interpenetrate. */
+/** Minimum gap enforced between two props' footprint circles in a chunk. */
 const OBSTACLE_GAP = 0.35;
 
-/** Attempts to find a legal spot for one obstacle before giving up on it. */
+/** Attempts to find a legal spot for one prop before giving up on it. */
 const PLACE_ATTEMPTS = 6;
+
+/**
+ * A boulder's collider is the axis-aligned box of its actual (jittered,
+ * squashed, rotated) geometry, pulled in horizontally by this much. A boulder
+ * is round: the full AABB would leave you standing on thin air out at the
+ * corners, where the visible stone has already sloped away.
+ */
+const ROCK_COLLIDER_SHRINK = 0.82;
+
+/**
+ * Trunk collider half-width = trunk bottom radius * this + pad. Slightly wider
+ * than the bark so a lean can't leave the visible trunk hanging outside its own
+ * collider, and still only ~a third of the canopy it holds up.
+ */
+const TRUNK_COLLIDER_SPREAD = 1.25;
+const TRUNK_COLLIDER_PAD = 0.05;
 
 /**
  * Integer chunk keys. A `${cx},${cz}` string would allocate on every bucket
@@ -53,13 +87,28 @@ const PLACE_ATTEMPTS = 6;
 const KEY_OFFSET = 16384;
 const KEY_STRIDE = 32768;
 
+const TAU = Math.PI * 2;
+
 // ------------------------------------------------------------------ scratch
 // Hoisted so nothing in the per-frame or per-chunk path allocates.
 
 const _mat4 = new THREE.Matrix4();
+const _quat = new THREE.Quaternion();
+const _pos = new THREE.Vector3();
+const _scl = new THREE.Vector3();
+const _axis = new THREE.Vector3();
+const _off = new THREE.Vector3();
+const _up = new THREE.Vector3(0, 1, 0);
 const _colA = new THREE.Color();
 const _colB = new THREE.Color();
-const _geoms = [];
+
+/** Per-chunk geometry lists, one per shared material. Reused, never reallocated. */
+const _bark = [];
+const _leaf = [];
+const _stone = [];
+
+/** World-space extents of the last geometry paint() walked: minXYZ then maxXYZ. */
+const _ext = new Float64Array(6);
 
 // --------------------------------------------------------------- primitives
 
@@ -95,6 +144,14 @@ function range(rng, a, b) {
   return a + (b - a) * rng();
 }
 
+/** Deterministic index into a pool of variants. */
+function pick(rng, n) {
+  const i = (rng() * n) | 0;
+  return i < 0 ? 0 : i >= n ? n - 1 : i;
+}
+
+const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+
 /**
  * True only for a usable streaming centre. A non-finite player coordinate is
  * unrecoverable here: Math.floor(NaN) keys a chunk by NaN, every NaN comparison
@@ -110,28 +167,189 @@ function usableCoord(v) {
 // ------------------------------------------------------------ base geometry
 
 /**
- * One unit cube, origin at the centre of its BOTTOM face, built once and cloned
- * per obstacle. `uv` is deleted (no maps anywhere in this game) and a `color`
- * attribute is added so each merged box can carry its own tint and fake AO.
+ * Position-keyed hash. An icosahedron from PolyhedronGeometry is NON-indexed,
+ * so each of its twelve corners appears in five triangles as five separate but
+ * bitwise-identical vertices. Keying the jitter off the position means those
+ * five copies always move together - jittering per-vertex instead would tear
+ * the solid open along every shared edge.
  */
-const BASE_BOX = new THREE.BoxGeometry(1, 1, 1);
-BASE_BOX.deleteAttribute('uv');
-BASE_BOX.translate(0, 0.5, 0);
-BASE_BOX.setAttribute(
-  'color',
-  new THREE.BufferAttribute(new Float32Array(BASE_BOX.attributes.position.count * 3).fill(1), 3),
-);
+function cornerNoise(x, y, z, salt) {
+  let h = Math.imul((Math.round(x * 4096) | 0) ^ 0x9e3779b9, 0x85ebca6b);
+  h = Math.imul(h ^ (Math.round(y * 4096) | 0), 0xc2b2ae35);
+  h = Math.imul(h ^ (Math.round(z * 4096) | 0), 0x27d4eb2d);
+  h = Math.imul(h ^ (salt | 0) ^ (h >>> 13), 0x165667b1);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+/** Adds the white `color` attribute every mergeable prop geometry must carry. */
+function withColor(g) {
+  g.setAttribute(
+    'color',
+    new THREE.BufferAttribute(new Float32Array(g.attributes.position.count * 3).fill(1), 3),
+  );
+  return g;
+}
+
+/** Unit icosahedron, 20 faces, no uv (there are no maps anywhere in this game). */
+const BLOB_SOURCE = new THREE.IcosahedronGeometry(1, 0);
+BLOB_SOURCE.deleteAttribute('uv');
 
 /**
- * Local height of every base-box vertex (0 at the base, 1 at the top), cached
- * so the per-obstacle shading loop is a straight array read.
+ * A pool of pre-jittered blobs, built ONCE at module load. Per prop we clone
+ * one and hit it with a scale/rotate/translate matrix, which is far cheaper
+ * than re-jittering and re-normalising 60 vertices for every rock in a chunk,
+ * and - crossed with random squash, yaw and size - still means no two boulders
+ * in a run look alike.
+ *
+ * `minY`/`maxY`/`maxR` are the variant's own local extents, cached so a prop
+ * can be seated on the ground to an exact visible height without measuring.
  */
-const BASE_LOCAL_Y = (() => {
-  const pos = BASE_BOX.attributes.position;
-  const out = new Float32Array(pos.count);
-  for (let i = 0; i < pos.count; i++) out[i] = pos.array[i * 3 + 1];
-  return out;
-})();
+function makeBlobPool(count, jitter, salt0) {
+  const geoms = [];
+  const minY = new Float64Array(count);
+  const maxY = new Float64Array(count);
+  const absY = new Float64Array(count);
+  const maxR = new Float64Array(count);
+
+  for (let v = 0; v < count; v++) {
+    const g = BLOB_SOURCE.clone();
+    const pos = g.attributes.position.array;
+    let lo = Infinity;
+    let hi = -Infinity;
+    let rr = 0;
+    for (let i = 0; i < pos.length; i += 3) {
+      const x = pos[i];
+      const y = pos[i + 1];
+      const z = pos[i + 2];
+      const s = 1 + (cornerNoise(x, y, z, salt0 + v * 9973) - 0.5) * 2 * jitter;
+      const nx = x * s;
+      const ny = y * s;
+      const nz = z * s;
+      pos[i] = nx;
+      pos[i + 1] = ny;
+      pos[i + 2] = nz;
+      if (ny < lo) lo = ny;
+      if (ny > hi) hi = ny;
+      const r2 = nx * nx + nz * nz;
+      if (r2 > rr) rr = r2;
+    }
+    // Non-indexed + recomputed normals = flat facets, which is what makes a
+    // 20-triangle lump read as stone or as a leaf clump rather than as a ball.
+    g.computeVertexNormals();
+    withColor(g);
+    geoms.push(g);
+    minY[v] = lo;
+    maxY[v] = hi;
+    // The jitter is not symmetric, so a blob reaches further below its centre
+    // than above it (or the other way about). Vertical scaling normalises by
+    // the LARGER of the two, which is what lets a canopy promise that no leaf
+    // hangs below its stated underside.
+    absY[v] = Math.max(Math.abs(lo), Math.abs(hi)) || 1;
+    maxR[v] = Math.sqrt(rr) || 1;
+  }
+  return { geoms, minY, maxY, absY, maxR, count };
+}
+
+/** Canopies and bushes: gently irregular. */
+const FOLIAGE_BLOBS = makeBlobPool(5, 0.17, 0x51ed);
+/** Boulders: hard, angular jitter so the facets catch the sun. */
+const ROCK_BLOBS = makeBlobPool(5, 0.31, 0x2b9f);
+
+/**
+ * A unit trunk: six-sided, tapered, open-ended, origin at the centre of its
+ * BOTTOM face so a lean rotates about where it meets the ground. Open-ended
+ * halves the vertex count; the base is buried by TRUNK_SINK and the top always
+ * sits inside the first canopy blob, so neither cap is ever visible.
+ */
+function makeTrunk(taper) {
+  const src = new THREE.CylinderGeometry(taper, 1, 1, 6, 1, true);
+  src.deleteAttribute('uv');
+  src.translate(0, 0.5, 0);
+  const g = src.toNonIndexed(); // keeps every merge group homogeneous
+  src.dispose();
+  g.computeVertexNormals();
+  return withColor(g);
+}
+
+const TRUNKS = [makeTrunk(0.56), makeTrunk(0.74)];
+
+/**
+ * Bakes a prop's tint and a vertical fake-AO gradient into its vertex colours,
+ * and records the geometry's world-space extents in `_ext` on the way past.
+ * The colours MULTIPLY the shared material colour, so the dread recolouring in
+ * update() still works while the merged mass stops reading as one flat slab.
+ */
+function paint(geo, baseY, spanY, cr, cg, cb) {
+  const pos = geo.attributes.position.array;
+  const col = geo.attributes.color.array;
+  const inv = spanY > 1e-4 ? 1 / spanY : 0;
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
+
+  for (let i = 0; i < pos.length; i += 3) {
+    const x = pos[i];
+    const y = pos[i + 1];
+    const z = pos[i + 2];
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+    if (z < minZ) minZ = z;
+    if (z > maxZ) maxZ = z;
+
+    let t = (y - baseY) * inv;
+    if (t < 0) t = 0;
+    else if (t > 1) t = 1;
+    const sh = SHADE_BOTTOM + (SHADE_TOP - SHADE_BOTTOM) * t;
+    col[i] = sh * cr;
+    col[i + 1] = sh * cg;
+    col[i + 2] = sh * cb;
+  }
+
+  _ext[0] = minX;
+  _ext[1] = minY;
+  _ext[2] = minZ;
+  _ext[3] = maxX;
+  _ext[4] = maxY;
+  _ext[5] = maxZ;
+}
+
+/**
+ * Composes a free-floating blob. The half-extents are metres and they are a
+ * PROMISE: no vertex ends up further than halfX/halfY/halfZ from the centre,
+ * which is what the canopy floor guarantee in placeTree rests on.
+ */
+function composeBlob(pool, vi, halfX, halfY, halfZ, yaw, x, y, z) {
+  const mr = pool.maxR[vi];
+  const my = pool.absY[vi];
+  _pos.set(x, y, z);
+  _quat.setFromAxisAngle(_up, yaw);
+  _scl.set(halfX / mr, halfY / my, halfZ / mr);
+  _mat4.compose(_pos, _quat, _scl);
+}
+
+/**
+ * Composes a blob SEATED on the ground: its top lands exactly at
+ * groundY + topH, and `buryFrac` of that height is sunk below the plane so the
+ * thing looks settled into the leaf litter instead of dropped on it.
+ * Solving for the scale from the variant's own extents is what lets a rock's
+ * collider top be its visible top rather than an estimate of it.
+ */
+function composeSeated(pool, vi, radius, aspect, topH, buryFrac, yaw, x, z, groundY) {
+  const mr = pool.maxR[vi];
+  const lo = pool.minY[vi];
+  const hi = pool.maxY[vi];
+  const span = hi - lo || 1;
+  const sy = (topH * (1 + buryFrac)) / span;
+  _pos.set(x, groundY + topH - sy * hi, z);
+  _quat.setFromAxisAngle(_up, yaw);
+  _scl.set(radius / mr, sy, (radius * aspect) / mr);
+  _mat4.compose(_pos, _quat, _scl);
+}
 
 // -------------------------------------------------------------- ground grid
 
@@ -200,11 +418,83 @@ export function createWorld(ctx) {
   group.name = 'world';
   group.matrixAutoUpdate = false;
 
+  // ------------------------------------------------------------- prop sizes
+  // Derived from the config so retuning obstacleMaxSize/Height, the jump or the
+  // camera actually changes the forest instead of silently disagreeing with it.
+
+  const HALF_MIN = W.obstacleMinSize * 0.5;
+  const HALF_MAX = W.obstacleMaxSize * 0.5;
+
+  /** Apex of a jump, in metres above the feet: v^2 / 2g. */
+  const JUMP_APEX =
+    (CONFIG.player.jumpVelocity * CONFIG.player.jumpVelocity) /
+    (2 * Math.abs(CONFIG.player.gravity));
+
+  /**
+   * Lowest a canopy may ever hang. The chase camera rides at camera.height
+   * above the player's feet, so keeping every leaf above that means a tree can
+   * shade you but can never swallow the camera - the one thing a forest can do
+   * to a fixed-heading chase cam that would be unforgivable. The 15cm on top is
+   * margin: a leaning trunk gives up a couple of centimetres of height to its
+   * own tilt, and this absorbs that rather than the camera doing so.
+   */
+  const CANOPY_FLOOR = CONFIG.camera.height + 0.15;
+
+  const TREE_H_MIN = W.obstacleMaxHeight * 0.77;
+  const TREE_H_MAX = W.obstacleMaxHeight;
+  const CROWN_R_MIN = HALF_MAX * 0.5;
+  const CROWN_R_MAX = HALF_MAX;
+  const TREE_LEAN_MAX = 0.13; // radians. Enough to break the warehouse look.
+  /** How far below the trunk top the lowest leaf may reach, as a fraction of crown height. */
+  const CANOPY_DROP = 0.2;
+  /** Shortest crown worth drawing. Below this a tree reads as a fence post. */
+  const MIN_CROWN_H = 1.0;
+  /**
+   * Shortest a tree can be and still hold a real crown above CANOPY_FLOOR.
+   * Solving trunkH >= (floor + drop*h) / (1 + drop) against trunkH <= h - crown
+   * gives exactly this, so no config edit can produce a tree whose canopy has
+   * to be squashed into nothing to stay above the camera.
+   */
+  const MIN_TREE_H = CANOPY_FLOOR + MIN_CROWN_H * (1 + CANOPY_DROP);
+
+  /**
+   * Tall enough to jump onto and no taller. Tie it to the actual jump so a
+   * change to jumpVelocity can never quietly produce un-hoppable boulders.
+   */
+  const ROCK_H_MAX = Math.min(W.obstacleMaxHeight * 0.25, JUMP_APEX * 0.78);
+  const ROCK_H_MIN = Math.min(0.42, ROCK_H_MAX * 0.5);
+  const ROCK_R_MIN = HALF_MIN;
+  const ROCK_R_MAX = HALF_MAX * 0.68;
+
+  const BUSH_R_MIN = HALF_MIN;
+  const BUSH_R_MAX = HALF_MAX * 0.62;
+  const BUSH_H_MIN = 0.4;
+  const BUSH_H_MAX = 1.3;
+
+  // Normalised propMix -> cumulative thresholds for one rng draw.
+  const MIX = W.propMix || {};
+  const mTree = Math.max(0, Number(MIX.tree) || 0);
+  const mRock = Math.max(0, Number(MIX.rock) || 0);
+  const mBush = Math.max(0, Number(MIX.bush) || 0);
+  const mSum = mTree + mRock + mBush;
+  const MIX_TREE = mSum > 0 ? mTree / mSum : 0.44;
+  const MIX_ROCK_END = mSum > 0 ? (mTree + mRock) / mSum : 0.7;
+
   // -------------------------------------------------------------- materials
-  // One material for every obstacle in the world; its colour is lerped toward
-  // the dread palette in update(), which recolours all 49 chunks for free.
-  const obstacleMaterial = new THREE.MeshLambertMaterial({
+  // Three materials for the whole world. Their colours are lerped toward the
+  // dread palette in update(), which recolours all 49 chunks for free.
+  const barkMaterial = new THREE.MeshLambertMaterial({
     color: P.obstacleCalm,
+    vertexColors: true,
+    dithering: true,
+  });
+  const foliageMaterial = new THREE.MeshLambertMaterial({
+    color: P.foliageCalm,
+    vertexColors: true,
+    dithering: true,
+  });
+  const stoneMaterial = new THREE.MeshLambertMaterial({
+    color: P.rockCalm,
     vertexColors: true,
     dithering: true,
   });
@@ -239,12 +529,23 @@ export function createWorld(ctx) {
   group.add(groundMesh);
 
   // ----------------------------------------------------------------- chunks
-  /** @type {Map<number, {cx:number,cz:number,id:string,mesh:THREE.Mesh|null,colliders:Array,builtLevel:number}>} */
+  /** @type {Map<number, {cx:number,cz:number,id:string,meshes:Array,colliders:Array,builtLevel:number}>} */
   const chunks = new Map();
 
   /** Flat live list of every world-space AABB. Rebuilt when chunks come and go. */
   const colliders = [];
   let collidersDirty = false;
+
+  /**
+   * Footprint circles (x, z, radius) of the props already placed in the chunk
+   * being built. A flat preallocated array, so spacing costs no garbage - and a
+   * circle rather than a box because rocks and canopies are rotated.
+   */
+  const FOOT_CAP = Math.max(8, Math.ceil(W.obstaclesPerChunkMax) + 2);
+  const _foot = new Float64Array(FOOT_CAP * 3);
+  let footCount = 0;
+  let spotX = 0;
+  let spotZ = 0;
 
   /**
    * Offsets from the player's chunk, pre-sorted nearest-first. Streaming walks
@@ -279,46 +580,322 @@ export function createWorld(ctx) {
     if (usableCoord(pos.z) && Math.abs(pos.z) < CENTRE_LIMIT) centreZ = pos.z;
   }
 
-  // ------------------------------------------------------------ obstacles
+  // ---------------------------------------------------------------- props
 
   /**
-   * Obstacles per chunk = clamp(base + level * perLevel, base, max).
+   * Props per chunk = clamp(base + level * perLevel, base, max).
    * The fractional part is carried probabilistically (deterministically, from
-   * the chunk's own rng) so density ramps smoothly instead of stepping.
+   * the chunk's own rng) so density ramps smoothly instead of stepping. It
+   * always costs EXACTLY one rng draw, which is what keeps every prop after it
+   * identical across levels.
    */
   function obstacleCountFor(level, rng) {
     const raw = W.obstaclesPerChunkBase + level * W.obstaclesPerChunkPerLevel;
     const clamped = Math.min(Math.max(raw, W.obstaclesPerChunkBase), W.obstaclesPerChunkMax);
     const whole = Math.floor(clamped);
-    return whole + (rng() < clamped - whole ? 1 : 0);
+    const n = whole + (rng() < clamped - whole ? 1 : 0);
+    return Math.min(n, FOOT_CAP);
   }
 
-  /**
-   * True if the box centred at (px, pz) with the given half-extents reaches
-   * into the spawn keep-out circle at the world origin.
-   */
-  function hitsSpawnClear(px, pz, halfX, halfZ) {
-    const dx = Math.max(0, Math.abs(px) - halfX);
-    const dz = Math.max(0, Math.abs(pz) - halfZ);
-    return dx * dx + dz * dz < W.spawnClearRadius * W.spawnClearRadius;
+  function addFoot(x, z, r) {
+    if (footCount >= FOOT_CAP) return;
+    const i = footCount * 3;
+    _foot[i] = x;
+    _foot[i + 1] = z;
+    _foot[i + 2] = r;
+    footCount++;
   }
 
-  /** True if the footprint overlaps anything already placed in this chunk. */
-  function overlapsPlaced(list, px, pz, halfX, halfZ) {
-    for (let i = 0; i < list.length; i++) {
-      const c = list[i];
-      if (px + halfX + OBSTACLE_GAP < c.min.x || px - halfX - OBSTACLE_GAP > c.max.x) continue;
-      if (pz + halfZ + OBSTACLE_GAP < c.min.z || pz - halfZ - OBSTACLE_GAP > c.max.z) continue;
-      return true;
+  /** True if a footprint circle overlaps anything already placed in this chunk. */
+  function overlapsPlaced(px, pz, r) {
+    for (let i = 0, n = footCount * 3; i < n; i += 3) {
+      const dx = px - _foot[i];
+      const dz = pz - _foot[i + 1];
+      const rr = r + _foot[i + 2] + OBSTACLE_GAP;
+      if (dx * dx + dz * dz < rr * rr) return true;
     }
     return false;
   }
 
   /**
-   * Builds one chunk: merged obstacle mesh + its collider bucket.
+   * Finds a legal spot for one prop, writing it to spotX/spotZ.
+   *
+   * `inset` keeps the prop's COLLIDER wholly inside its own chunk, which is the
+   * invariant that lets queryAABB test only the buckets a query box touches.
+   * Canopies and bushes are allowed to overhang the chunk line - they carry no
+   * collider out there, and a forest that stopped dead at every 32m boundary
+   * would read as a grid of hedges.
+   *
+   * Both coordinates are drawn on every attempt, before any rejection, so an
+   * attempt always costs exactly two rng values.
+   */
+  function findSpot(rng, originX, originZ, inset, spacing, visualR) {
+    const span = CS - inset * 2;
+    if (!(span > 0)) return false;
+    const clearR = W.spawnClearRadius + visualR;
+    for (let a = 0; a < PLACE_ATTEMPTS; a++) {
+      const px = originX + inset + rng() * span;
+      const pz = originZ + inset + rng() * span;
+      // Nothing at all - not even a leaf - inside the spawn keep-out circle.
+      if (px * px + pz * pz < clearR * clearR) continue;
+      if (overlapsPlaced(px, pz, spacing)) continue;
+      spotX = px;
+      spotZ = pz;
+      return true;
+    }
+    return false;
+  }
+
+  function pushCollider(bucket, cx, cz, halfX, halfZ, top) {
+    bucket.push({
+      min: new THREE.Vector3(cx - halfX, W.groundY, cz - halfZ),
+      max: new THREE.Vector3(cx + halfX, W.groundY + top, cz + halfZ),
+    });
+  }
+
+  /**
+   * TREE. A tapered, leaning trunk under two or three canopy blobs.
+   *
+   * COLLISION: the collider is the TRUNK and nothing else - roughly 0.7-1.1m
+   * across under a canopy that can be 4.2m wide. Boxing the canopy instead
+   * would hang an invisible wall between every pair of trees, turning a forest
+   * you weave through into a maze you bounce off, and at 7.2 m/s that is the
+   * difference between the game working and the game being unplayable. You run
+   * UNDER the leaves; you go AROUND the trunk. The collider runs the full
+   * height of the tree so the Protector - who tramples anything shorter than
+   * its stride - can never step over one.
+   */
+  function placeTree(rng, originX, originZ, bucket) {
+    const h = Math.max(range(rng, TREE_H_MIN, TREE_H_MAX), MIN_TREE_H);
+    const trunkFrac = range(rng, 0.62, 0.74);
+    // Keep the lowest leaf above the chase camera: with the canopy reaching
+    // CANOPY_DROP * crownH below the trunk top, that solves to this floor.
+    const minTrunk = (CANOPY_FLOOR + CANOPY_DROP * h) / (1 + CANOPY_DROP);
+    const trunkH = clamp(h * trunkFrac, minTrunk, h - MIN_CROWN_H);
+    const crownH = h - trunkH;
+    const crownR = range(rng, CROWN_R_MIN, CROWN_R_MAX);
+    const trunkR = range(rng, 0.15, 0.2) + crownR * range(rng, 0.05, 0.09);
+    const lean = range(rng, 0, TREE_LEAN_MAX);
+    const leanDir = rng() * TAU;
+    const leanXZ = Math.sin(lean) * trunkH;
+
+    const colliderHalf = trunkR * TRUNK_COLLIDER_SPREAD + TRUNK_COLLIDER_PAD;
+    const visualR = crownR * 1.3 + leanXZ;
+    // Spacing is measured trunk-to-trunk, not canopy-to-canopy: canopies are
+    // meant to knit together overhead, but two trunks must always leave a gap
+    // a running hand (and, for as long as it fits, the Protector) can take.
+    const spacing = Math.max(crownR * 0.72, 1.35);
+
+    if (!findSpot(rng, originX, originZ, colliderHalf + 0.02, spacing, visualR)) return;
+    const px = spotX;
+    const pz = spotZ;
+    addFoot(px, pz, spacing);
+    pushCollider(bucket, px, pz, colliderHalf, colliderHalf, h);
+
+    // Bark tint: warm, and varied enough that a stand of trees is not a stand
+    // of clones.
+    const bt = range(rng, 0.82, 1.1);
+    const br = bt * range(rng, 0.97, 1.07);
+    const bg = bt;
+    const bb = bt * range(rng, 0.88, 1.0);
+
+    // --- trunk
+    _axis.set(Math.cos(leanDir), 0, Math.sin(leanDir));
+    _quat.setFromAxisAngle(_axis, lean);
+    _pos.set(px, W.groundY - TRUNK_SINK, pz);
+    _scl.set(trunkR, trunkH + TRUNK_SINK, trunkR);
+    _mat4.compose(_pos, _quat, _scl);
+
+    const tg = TRUNKS[pick(rng, TRUNKS.length)].clone();
+    tg.applyMatrix4(_mat4);
+    paint(tg, W.groundY, h, br, bg, bb);
+    _bark.push(tg);
+
+    // Where the leaning trunk actually ends up.
+    _off.set(0, trunkH + TRUNK_SINK, 0).applyQuaternion(_quat);
+    const topX = px + _off.x;
+    const topY = W.groundY - TRUNK_SINK + _off.y;
+    const topZ = pz + _off.z;
+    const floorY = topY - CANOPY_DROP * crownH;
+
+    // Foliage tint: the whole olive-to-deep-green spread, so no two crowns in a
+    // stand are the same green.
+    const ft = range(rng, 0.8, 1.12);
+    const fr = ft * range(rng, 0.86, 1.1);
+    const fg = ft * range(rng, 0.96, 1.08);
+    const fb = ft * range(rng, 0.8, 1.02);
+
+    // --- main canopy: sits on the trunk top, its underside just below it.
+    const crownRy = crownH * 0.58;
+    const cy0 = topY + crownH - crownRy;
+    const v0 = pick(rng, FOLIAGE_BLOBS.count);
+    composeBlob(
+      FOLIAGE_BLOBS, v0,
+      crownR, crownRy, crownR * range(rng, 0.78, 1.0), rng() * TAU,
+      topX, cy0, topZ,
+    );
+    const cg0 = FOLIAGE_BLOBS.geoms[v0].clone();
+    cg0.applyMatrix4(_mat4);
+    paint(cg0, W.groundY, h, fr, fg, fb);
+    _leaf.push(cg0);
+
+    // --- one or two secondary lobes, so the crown is a clump and not a ball.
+    const lobes = rng() < 0.62 ? 2 : 1;
+    for (let b = 0; b < lobes; b++) {
+      const lr = crownR * range(rng, 0.5, 0.8);
+      const ly = lr * range(rng, 0.72, 1.02);
+      const ang = rng() * TAU;
+      const dist = crownR * range(rng, 0.18, 0.42);
+      const dy = crownH * range(rng, -0.22, 0.3);
+      const vi = pick(rng, FOLIAGE_BLOBS.count);
+      composeBlob(
+        FOLIAGE_BLOBS, vi,
+        lr, ly, lr * range(rng, 0.8, 1.0), rng() * TAU,
+        topX + Math.cos(ang) * dist,
+        // Never let a lobe hang below the canopy floor the camera relies on.
+        Math.max(cy0 + dy, floorY + ly),
+        topZ + Math.sin(ang) * dist,
+      );
+      const lg = FOLIAGE_BLOBS.geoms[vi].clone();
+      lg.applyMatrix4(_mat4);
+      paint(lg, W.groundY, h, fr, fg, fb);
+      _leaf.push(lg);
+    }
+  }
+
+  /**
+   * ROCK. A squashed, yaw-turned, vertex-jittered icosahedron, seated in the
+   * ground so a third of it is buried.
+   *
+   * COLLISION: capped at ROCK_H_MAX, which is tied to the actual jump apex, so
+   * every boulder in the world can be hopped onto. The collider TOP is the
+   * geometry's own measured top, so you stand on the stone and not in the air
+   * above it; the sides are pulled in by ROCK_COLLIDER_SHRINK because the AABB
+   * of a round thing sticks out past it at the corners, where the visible
+   * surface has already fallen away.
+   *
+   * A happy consequence of the height cap: the Protector's stride
+   * (monster STEP_OVER, which scales with its size) passes over boulders from
+   * about tier 4 on. Early on you both have to go around them; later it walks
+   * straight through the ones you still have to jump.
+   */
+  function placeRock(rng, originX, originZ, bucket) {
+    const radius = range(rng, ROCK_R_MIN, ROCK_R_MAX);
+    // Bigger boulders are taller: a 1.4m-wide stone 40cm high is a paving slab.
+    const h = clamp(
+      range(rng, radius * 0.42, radius * 1.25),
+      ROCK_H_MIN,
+      ROCK_H_MAX,
+    );
+    const aspect = range(rng, 0.66, 1.0);
+    const yaw = rng() * TAU;
+    const vi = pick(rng, ROCK_BLOBS.count);
+
+    // The whole boulder is inside a circle of `radius`, so insetting by it
+    // guarantees the collider stays inside the chunk.
+    if (!findSpot(rng, originX, originZ, radius, radius, radius)) return;
+    const px = spotX;
+    const pz = spotZ;
+    addFoot(px, pz, radius);
+
+    const st = range(rng, 0.82, 1.12);
+    const sr = st * range(rng, 0.97, 1.04);
+    const sg = st;
+    const sb = st * range(rng, 0.98, 1.08);
+
+    composeSeated(ROCK_BLOBS, vi, radius, aspect, h, 0.4, yaw, px, pz, W.groundY);
+    const g = ROCK_BLOBS.geoms[vi].clone();
+    g.applyMatrix4(_mat4);
+    paint(g, W.groundY, h, sr, sg, sb);
+    _stone.push(g);
+
+    // paint() left the real world-space extents in _ext: use them, so the
+    // collider is the stone that is actually there.
+    const cx = (_ext[0] + _ext[3]) * 0.5;
+    const cz = (_ext[2] + _ext[5]) * 0.5;
+    const halfX = (_ext[3] - _ext[0]) * 0.5 * ROCK_COLLIDER_SHRINK;
+    const halfZ = (_ext[5] - _ext[2]) * 0.5 * ROCK_COLLIDER_SHRINK;
+    pushCollider(bucket, cx, cz, halfX, halfZ, h);
+  }
+
+  /**
+   * BUSH. Two or three small foliage blobs sunk into the ground.
+   *
+   * COLLISION: NONE, deliberately. A bush is knee-to-waist high, so any
+   * collider it could carry would be under the player's 0.35m step height -
+   * meaning the hand would climb onto every shrub it touched and bob back down
+   * off the far side, which looks broken - or above it, meaning a shrub could
+   * stop a player fleeing at 7.2 m/s dead in front of the Protector. Neither is
+   * a trade worth making for clutter whose entire job is to break up
+   * sightlines. So you run straight through the leaves, the Protector does too,
+   * and bushes cost the 120Hz collision path exactly nothing: they never enter
+   * a collider bucket at all. They still take a spacing footprint, so they
+   * cannot grow out of the middle of a boulder.
+   */
+  function placeBush(rng, originX, originZ) {
+    const radius = range(rng, BUSH_R_MIN, BUSH_R_MAX);
+    const h = clamp(range(rng, radius * 0.6, radius * 1.35), BUSH_H_MIN, BUSH_H_MAX);
+    const lobes = rng() < 0.55 ? 3 : 2;
+
+    // Soft clutter nestles: half spacing, so bushes gather under canopies and
+    // against boulders the way undergrowth actually does.
+    if (!findSpot(rng, originX, originZ, 0.2, radius * 0.5, radius)) return;
+    const px = spotX;
+    const pz = spotZ;
+    addFoot(px, pz, radius * 0.5);
+
+    const ft = range(rng, 0.74, 1.06);
+    const fr = ft * range(rng, 0.88, 1.08);
+    const fg = ft * range(rng, 0.94, 1.06);
+    const fb = ft * range(rng, 0.78, 1.0);
+
+    for (let b = 0; b < lobes; b++) {
+      const lr = radius * range(rng, 0.46, 0.8);
+      const lh = h * range(rng, 0.62, 1.0);
+      const ang = rng() * TAU;
+      const dist = (radius - lr) * range(rng, 0.0, 0.95);
+      const vi = pick(rng, FOLIAGE_BLOBS.count);
+      composeSeated(
+        FOLIAGE_BLOBS, vi,
+        lr, range(rng, 0.7, 1.0), lh, 0.45, rng() * TAU,
+        px + Math.cos(ang) * dist, pz + Math.sin(ang) * dist, W.groundY,
+      );
+      const g = FOLIAGE_BLOBS.geoms[vi].clone();
+      g.applyMatrix4(_mat4);
+      paint(g, W.groundY, h, fr, fg, fb);
+      _leaf.push(g);
+    }
+  }
+
+  /**
+   * Merges one material's worth of a chunk into a single mesh. World
+   * coordinates are baked into the vertices, so the mesh itself stays at
+   * identity: no per-frame matrix work, and the bounding sphere is already in
+   * world space for correct frustum culling.
+   */
+  function mergeInto(list, material, label, meshes) {
+    if (list.length === 0) return;
+    const merged = mergeGeometries(list, false);
+    for (let i = 0; i < list.length; i++) list[i].dispose();
+    list.length = 0;
+    if (!merged) return;
+
+    merged.computeBoundingSphere();
+    const mesh = new THREE.Mesh(merged, material);
+    mesh.name = label;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.matrixAutoUpdate = false;
+    mesh.updateMatrix();
+    group.add(mesh);
+    meshes.push(mesh);
+  }
+
+  /**
+   * Builds one chunk: up to three merged meshes + its collider bucket.
    * The layout depends only on (cx, cz) and `level`, and because the rng draw
-   * order per obstacle is independent of the total count, raising the level
-   * only ADDS boxes - the ones already there keep their exact places.
+   * order per prop is independent of the total count, raising the level only
+   * ADDS props - the ones already there keep their exact places.
    */
   function buildChunk(cx, cz, level) {
     const rng = mulberry32(hashChunk(cx, cz));
@@ -327,106 +904,28 @@ export function createWorld(ctx) {
     const originZ = cz * CS;
 
     const bucket = [];
-    _geoms.length = 0;
+    footCount = 0;
+    _bark.length = 0;
+    _leaf.length = 0;
+    _stone.length = 0;
 
     for (let i = 0; i < count; i++) {
-      // Three silhouettes, and the mix is the point: low steps are hop-on
-      // platforms (jump apex is ~1.47m), blocks and pillars must be run around.
-      const kind = rng();
-      let sx;
-      let sz;
-      let h;
-      if (kind < 0.45) {
-        sx = range(rng, 2.0, W.obstacleMaxSize);
-        sz = range(rng, 2.0, W.obstacleMaxSize);
-        h = range(rng, 0.45, 1.15);
-      } else if (kind < 0.78) {
-        sx = range(rng, 1.6, 3.4);
-        sz = range(rng, 1.6, 3.4);
-        h = range(rng, 1.7, 3.2);
-      } else {
-        sx = range(rng, W.obstacleMinSize, 2.0);
-        sz = range(rng, W.obstacleMinSize, 2.0);
-        h = range(rng, 3.4, W.obstacleMaxHeight);
-      }
-      sx = Math.min(Math.max(sx, W.obstacleMinSize), W.obstacleMaxSize);
-      sz = Math.min(Math.max(sz, W.obstacleMinSize), W.obstacleMaxSize);
-      h = Math.min(h, W.obstacleMaxHeight);
-
-      const halfX = sx * 0.5;
-      const halfZ = sz * 0.5;
-
-      // Placement is inset so every box lies WHOLLY inside its own chunk. That
-      // invariant is what lets queryAABB test only the buckets the query box
-      // touches - a collider can never leak into a neighbour's cell.
-      let px = 0;
-      let pz = 0;
-      let placed = false;
-      for (let attempt = 0; attempt < PLACE_ATTEMPTS; attempt++) {
-        px = originX + halfX + rng() * (CS - sx);
-        pz = originZ + halfZ + rng() * (CS - sz);
-        if (hitsSpawnClear(px, pz, halfX, halfZ)) continue;
-        if (overlapsPlaced(bucket, px, pz, halfX, halfZ)) continue;
-        placed = true;
-        break;
-      }
-      if (!placed) continue;
-
-      // Collider sits exactly on the ground; the visible box is sunk slightly
-      // deeper so its bottom face never co-plane-fights the ground plane.
-      bucket.push({
-        min: new THREE.Vector3(px - halfX, W.groundY, pz - halfZ),
-        max: new THREE.Vector3(px + halfX, W.groundY + h, pz + halfZ),
-      });
-
-      const g = BASE_BOX.clone();
-
-      // Per-box tint + a vertical gradient standing in for ambient occlusion.
-      // These multiply the shared material colour, so dread recolouring still
-      // works while the merged mass stops reading as one flat slab.
-      const tint = range(rng, 0.86, 1.12);
-      const warm = range(rng, 0.96, 1.05);
-      const cool = range(rng, 0.94, 1.03);
-      const carr = g.attributes.color.array;
-      for (let v = 0; v < BASE_LOCAL_Y.length; v++) {
-        const shade = tint * (SHADE_BOTTOM + (SHADE_TOP - SHADE_BOTTOM) * BASE_LOCAL_Y[v]);
-        carr[v * 3] = shade * warm;
-        carr[v * 3 + 1] = shade;
-        carr[v * 3 + 2] = shade * cool;
-      }
-
-      _mat4.makeScale(sx, h + BOX_SINK, sz);
-      _mat4.setPosition(px, W.groundY - BOX_SINK, pz);
-      g.applyMatrix4(_mat4);
-      _geoms.push(g);
+      const roll = rng();
+      if (roll < MIX_TREE) placeTree(rng, originX, originZ, bucket);
+      else if (roll < MIX_ROCK_END) placeRock(rng, originX, originZ, bucket);
+      else placeBush(rng, originX, originZ);
     }
 
-    let mesh = null;
-    if (_geoms.length > 0) {
-      // World coordinates are baked into the vertices, so the mesh itself stays
-      // at identity: no per-frame matrix work, and the bounding sphere is
-      // already in world space for correct frustum culling.
-      const merged = mergeGeometries(_geoms, false);
-      for (let i = 0; i < _geoms.length; i++) _geoms[i].dispose();
-      _geoms.length = 0;
-
-      if (merged) {
-        merged.computeBoundingSphere();
-        mesh = new THREE.Mesh(merged, obstacleMaterial);
-        mesh.name = `chunk ${cx},${cz}`;
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
-        mesh.matrixAutoUpdate = false;
-        mesh.updateMatrix();
-        group.add(mesh);
-      }
-    }
+    const meshes = [];
+    mergeInto(_bark, barkMaterial, `bark ${cx},${cz}`, meshes);
+    mergeInto(_leaf, foliageMaterial, `foliage ${cx},${cz}`, meshes);
+    mergeInto(_stone, stoneMaterial, `stone ${cx},${cz}`, meshes);
 
     const chunk = {
       cx,
       cz,
       id: `${cx},${cz}`,
-      mesh,
+      meshes,
       colliders: bucket,
       builtLevel: level,
     };
@@ -437,11 +936,13 @@ export function createWorld(ctx) {
 
   /** Frees a chunk's GPU memory and drops its colliders. */
   function disposeChunk(chunk) {
-    if (chunk.mesh) {
-      group.remove(chunk.mesh);
-      chunk.mesh.geometry.dispose(); // material is shared - never dispose it here
-      chunk.mesh = null;
+    const meshes = chunk.meshes;
+    for (let i = 0; i < meshes.length; i++) {
+      const mesh = meshes[i];
+      group.remove(mesh);
+      mesh.geometry.dispose(); // materials are shared - never dispose them here
     }
+    meshes.length = 0;
     chunk.colliders.length = 0;
     chunks.delete(chunkKey(chunk.cx, chunk.cz));
     collidersDirty = true;
@@ -496,7 +997,7 @@ export function createWorld(ctx) {
     // more cluttered as the monster escalates, but regenerating terrain near
     // the player would pop in front of their face, so only the outermost ring
     // (deep in fog) is ever upgraded, farthest first. Because generation is
-    // additive across levels, an upgrade only ever makes new boxes appear -
+    // additive across levels, an upgrade only ever makes new props appear -
     // nothing the player has already seen moves or vanishes.
     for (let i = ORDER.length - 1; i >= 0 && built < budget; i--) {
       const o = ORDER[i];
@@ -524,12 +1025,14 @@ export function createWorld(ctx) {
     groundMesh.updateMatrix();
   }
 
-  /** Drives the calm -> dread colour ramp on the two shared materials. */
+  /** Drives the calm -> dread colour ramp on the four shared materials. */
   function applyDread(dread) {
     const t = Math.min(Math.max(dread || 0, 0), 1);
     if (Math.abs(t - lastDread) < 0.002) return;
     lastDread = t;
-    obstacleMaterial.color.copy(_colA.setHex(P.obstacleCalm).lerp(_colB.setHex(P.obstacleDread), t));
+    barkMaterial.color.copy(_colA.setHex(P.obstacleCalm).lerp(_colB.setHex(P.obstacleDread), t));
+    foliageMaterial.color.copy(_colA.setHex(P.foliageCalm).lerp(_colB.setHex(P.foliageDread), t));
+    stoneMaterial.color.copy(_colA.setHex(P.rockCalm).lerp(_colB.setHex(P.rockDread), t));
     groundMaterial.color.copy(_colA.setHex(P.groundCalm).lerp(_colB.setHex(P.groundDread), t));
   }
 

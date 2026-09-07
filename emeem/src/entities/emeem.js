@@ -3,13 +3,38 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { CONFIG } from '../core/config.js';
 
 /**
- * EMEEM - the collectibles.
+ * EMEEM - the collectibles. THREE KINDS, ONE POOL.
  *
- * An Emeem is a candy button: a glossy coloured disc with a domed top, hovering
- * and slowly precessing just above the ground, wrapped in a soft additive halo
- * so it still reads as a target once the dread fog closes in.
+ *   emeem   +1   a glossy domed disc with a raised darker tip. The bread and
+ *                butter, and visually untouched from the day it shipped.
+ *   runner  +3   small, rare, and it MOVES. Drifts when it has not noticed you,
+ *                bolts away when you close, turns at a finite rate so it can be
+ *                cornered and cut off rather than merely outrun.
+ *   amaam   -2   the hazard. Big, cold, faceted, dead-centred, ringed by a sick
+ *                teal halo. Taking one costs you two points.
  *
- * THREE THINGS DRIVE THE DESIGN HERE:
+ * THE READ IS THE WHOLE DESIGN OF THE AMAAM. At forty metres through dread fog
+ * a 0.8m disc is about twelve pixels wide, so its silhouette tells you nothing
+ * in time - by the time SIZE reads you have already steered into it. What
+ * carries at that range is the halo, so the three kinds are separated first and
+ * foremost by what their halo IS:
+ *
+ *   emeem   a soft filled blob in its own warm body tone, breathing gently.
+ *   runner  the same filled blob, hot and pale, twinkling fast - motion plus
+ *           sparkle, the two things peripheral vision is actually good at.
+ *   amaam   a RING. A different texture entirely: hollow in the middle, one
+ *           fixed cold teal that appears nowhere else in the game, pulsing slow
+ *           and heavy. A bright pip inside a warm blob means take it; a dead
+ *           dark centre inside a cold ring means do not.
+ *
+ * Closer in, silhouette takes over and says the same thing again: the amaam is
+ * a wide low faceted slab (nine-sided, flat-shaded) wearing a broad dark lid
+ * instead of a cheerful pip, it hangs lower, it lolls further off vertical, it
+ * precesses with a lurch, and it heaves on a slow asymmetric bob that spends
+ * most of its time sitting low. Everything about it is heavy and wrong.
+ *
+ * THE OTHER THREE THINGS THAT DRIVE THIS FILE, unchanged from the day it
+ * shipped:
  *
  *  1. NO ALLOCATION DURING PLAY. Every mesh, sprite, material, geometry and
  *     vector is built once at construction. The per-frame loop writes into
@@ -23,13 +48,16 @@ import { CONFIG } from '../core/config.js';
  *     streamed area, but only TARGET_ACTIVE are live at once and they live in
  *     a ring around the player, biased AHEAD of them (toward -Z, the direction
  *     the camera faces and the direction you flee). Running forward is
- *     therefore always the greedy move, which is exactly the pressure the
- *     monster is supposed to create.
+ *     therefore always the greedy move - and now also the risky one, because
+ *     amaams spawn in the same forward cone as everything else.
  *
  *  3. THE MAGNET IS THE GAME FEEL. On a phone, with a 4-way D-pad and a thumb
- *     covering a third of the screen, "walk exactly onto a 0.42m disc" is
- *     miserable. Inside magnetRadius the Emeem comes to you and rises to the
- *     hand's grab height, so a near miss reads as a catch.
+ *     covering a third of the screen, "walk exactly onto a 0.22m disc" is
+ *     miserable. Inside magnetRadius a PRIZE comes to you and rises to the
+ *     hand's grab height, so a near miss reads as a catch. An amaam never
+ *     magnets: a hazard that reached for you would be unsteerable, and the
+ *     whole point of the amaam is that avoiding it is a decision you get to
+ *     make.
  *
  * World orientation is the project-wide fixed one: the camera sits on +Z
  * looking toward -Z, ground is y = 0, and state.player.pos is at the FEET.
@@ -45,18 +73,228 @@ const _max = new THREE.Vector3();
 const _hits = [];
 
 const AXIS_Y = new THREE.Vector3(0, 1, 0);
-/**
- * The disc is rotationally symmetric about its own axis, so spinning it about
- * that axis is invisible. Instead we tilt it off vertical by TILT and then spin
- * the tilted disc about WORLD Y: the face precesses, sweeping toward and away
- * from the camera and catching the sun's specular once per revolution. That
- * flash is what makes them findable in peripheral vision.
- */
-const TILT_Q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), 0.42);
+const AXIS_Z = new THREE.Vector3(0, 0, 1);
 
-// ------------------------------------------------------------- geometry sizing
-const COLORS = CONFIG.palette.emeems;
+/** Shortest signed angle into (-PI, PI]. Used by every steering decision. */
+function wrapPi(a) {
+  a %= TAU;
+  if (a > Math.PI) a -= TAU;
+  else if (a < -Math.PI) a += TAU;
+  return a;
+}
+
+/** Config numbers are the spec, but a bad edit must not take the module down. */
+function num(v, d) {
+  return typeof v === 'number' && Number.isFinite(v) ? v : d;
+}
+
 const E = CONFIG.emeem;
+const PAL = CONFIG.palette;
+const KC = (E && E.kinds) || {};
+
+// ------------------------------------------------------------------- kinds
+
+/**
+ * The one halo colour an amaam ever wears. Fixed, not sampled from its body
+ * tones, because the halo is the SIGNAL: "cold teal ring means it takes points
+ * off you" is a rule a player learns in exactly one death, and a rule you can
+ * only learn if the colour never varies. It is also a hue that appears nowhere
+ * else - the prizes are warm, the ground is yellow-green, the fog goes from
+ * pale blue to dried blood - so nothing on screen can be confused for it.
+ */
+const AMAAM_HALO = 0x6fd3c8;
+
+/**
+ * ...and the cold light it gives off. The body tones from palette.amaams are
+ * olive, which sits uncomfortably close to the forest floor at low dread, so
+ * the emissive is pushed hard toward teal instead of tinting the body colour.
+ * That is what stops an amaam from disappearing into the ground it lies on.
+ */
+const AMAAM_EMISSIVE = 0x2f5f59;
+
+/**
+ * Builds one kind's static description: the numbers from config, the geometry
+ * recipe, and everything derived from them. Everything here is frozen at module
+ * load; the GPU-side assets are per-factory and live in `art` below.
+ */
+function defineKind(id, raw, look) {
+  const radius = num(raw.radius, E.radius);
+  const pickupRadius = num(raw.pickupRadius, E.pickupRadius);
+  const bobHeight = look.bobHeight;
+  const hoverY = look.hoverY;
+  return {
+    id,
+    points: num(raw.points, 1),
+    weight: Math.max(0, num(raw.weight, 0)),
+    prize: num(raw.points, 1) > 0,
+
+    radius,
+    pickupRadius,
+    pickR2: pickupRadius * pickupRadius,
+
+    /** Halo size straight from config: radius * kind.glow. */
+    glowScale: radius * num(raw.glow, 7.5),
+
+    // --- pose -------------------------------------------------------------
+    hoverY,
+    bobHeight,
+    bobSpeed: look.bobSpeed,
+    spinSpeed: look.spinSpeed,
+    lurch: look.lurch || 0,
+    heavyBob: !!look.heavyBob,
+    tiltQ: new THREE.Quaternion().setFromAxisAngle(AXIS_Z, look.tilt),
+
+    // --- halo -------------------------------------------------------------
+    ring: !!look.ring,
+    haloFixed: look.haloFixed || 0,     // 0 => wear the body tone
+    haloPulse: look.haloPulse,          // amplitude of the scale breathe
+    haloRate: look.haloRate,            // rad/s of that breathe
+    haloBase: look.haloBase,
+    haloGain: look.haloGain,
+
+    // --- surface ----------------------------------------------------------
+    colors: look.colors,
+    tipShade: look.tipShade,
+    roughness: look.roughness,
+    flat: !!look.flat,
+    emissiveHex: look.emissiveHex || 0, // 0 => emit in the body tone
+    emissiveBase: look.emissiveBase,
+    emissiveGain: look.emissiveGain,
+    geo: look.geo,                      // geometry recipe, built per factory
+
+    // --- gameplay ---------------------------------------------------------
+    /** Prizes come to the pincer; hazards never move toward you. */
+    magnetic: num(raw.points, 1) > 0,
+    /**
+     * Vertical grab window, relative to the player's FEET. A collectible hovers
+     * hoverY above whatever ground it sits on, so on flat ground the gap is
+     * exactly hoverY. Reaching DOWN as far as hoverY + player.radius keeps one
+     * beside a low kerb grabbable; reaching UP as far as player.height + hoverY
+     * lets you snatch one at the apex of a jump (apex = jumpVelocity^2 /
+     * 2|gravity| = 1.47m) while still refusing to vacuum the ground from the
+     * roof of a 4m block. It is also why you can JUMP AN AMAAM: an amaam hangs
+     * low, so it leaves the window well before the apex of a hop.
+     */
+    pickYMin: -(hoverY + CONFIG.player.radius),
+    pickYMax: CONFIG.player.height + hoverY,
+
+    /** Clearance box tested against world colliders before a spawn is accepted. */
+    clearXZ: radius + 0.55,
+    clearY: hoverY + bobHeight + radius,
+
+    // --- runner motion (ignored by the still kinds) ------------------------
+    moves: !!look.moves,
+    speed: num(raw.speed, 4.2),
+    wanderSpeed: num(raw.wanderSpeed, 1.1),
+    fleeRadius: num(raw.fleeRadius, 7.0),
+    fleeR2: num(raw.fleeRadius, 7.0) ** 2,
+    turnRate: num(raw.turnRate, 3.4),
+
+    // --- collect reaction --------------------------------------------------
+    popTime: look.popTime,
+    burstTime: look.burstTime,
+  };
+}
+
+/**
+ * An emeem is a flattened circular base with a small raised tip at its centre.
+ * Its numbers are reproduced here EXACTLY as they shipped - this kind is not
+ * being redesigned, only joined by two others.
+ */
+const EMEEM = defineKind('emeem', KC.emeem || {}, {
+  colors: PAL.emeems,
+  tipShade: num(PAL.emeemTipShade, 0.78),
+  roughness: 0.62,
+  emissiveBase: 0.38,
+  emissiveGain: 0.72,
+  haloBase: 0.42,
+  haloGain: 0.36,
+  haloPulse: 0.07,
+  haloRate: num(E.bobSpeed, 2.1) * 1.7,
+  hoverY: num(E.hoverY, 0.34),
+  bobHeight: num(E.bobHeight, 0.28),
+  bobSpeed: num(E.bobSpeed, 2.1),
+  spinSpeed: num(E.spinSpeed, 1.4),
+  tilt: 0.42,
+  popTime: 0.24,
+  burstTime: 0.38,
+  geo: { segW: 20, segH: 12, squash: 0.30, tipR: 0.30, tipSegW: 14, tipSegH: 10, tipSquash: 1.25, tipLift: 0.72 },
+});
+
+/**
+ * A runner is an emeem's little brother: the same family shape at two thirds
+ * the size, rounder, hotter, with a taller pip. It is deliberately NOT a new
+ * silhouette, because it has to read as treasure instantly; what marks it out
+ * is that it is pale, that it sparkles, and above all that it MOVES.
+ *
+ * Its halo multiplier (9.5) is larger than an emeem's but its radius is
+ * smaller, so at rest its halo is slightly the smaller of the two. The twinkle
+ * is what settles that: at the top of its pulse the halo is 24% wider than
+ * nominal, which puts its peak comfortably above an emeem's steady state, and a
+ * pulsing light is far easier to catch out of the corner of an eye than a
+ * larger steady one.
+ */
+const RUNNER = defineKind('runner', KC.runner || {}, {
+  colors: PAL.runners,
+  tipShade: 0.86,       // barely darker: a runner reads as one hot bead, not two-tone
+  roughness: 0.44,      // glossier than an emeem so it catches the sun harder
+  emissiveBase: 0.55,
+  emissiveGain: 0.85,
+  haloBase: 0.58,
+  haloGain: 0.34,
+  haloPulse: 0.24,      // the twinkle
+  haloRate: 7.4,
+  hoverY: num(E.hoverY, 0.34) * 1.06,
+  bobHeight: num(E.bobHeight, 0.28) * 0.62,
+  bobSpeed: num(E.bobSpeed, 2.1) * 1.55,
+  spinSpeed: num(E.spinSpeed, 1.4) * 2.1,
+  tilt: 0.34,
+  popTime: 0.24,
+  burstTime: 0.42,
+  moves: true,
+  geo: { segW: 16, segH: 10, squash: 0.38, tipR: 0.34, tipSegW: 12, tipSegH: 8, tipSquash: 1.35, tipLift: 0.78 },
+});
+
+/**
+ * An amaam is what an emeem looks like after something went wrong with it.
+ * Nine radial segments instead of twenty and flat shading, so its outline is
+ * visibly ANGULAR where an emeem is round; squashed harder, so it is a slab
+ * rather than a button; and its centre is a broad dark lid instead of a bright
+ * pip, so the middle of it reads as dead. It also sits low and lolls.
+ *
+ * Cheap, too, despite being the biggest thing in the field: 162 triangles
+ * against an emeem's 680.
+ */
+const AMAAM = defineKind('amaam', KC.amaam || {}, {
+  colors: PAL.amaams,
+  tipShade: num(PAL.amaamTipShade, 0.62),
+  roughness: 0.88,      // chalky and dead; no highlight to catch the eye warmly
+  flat: true,
+  emissiveHex: AMAAM_EMISSIVE,
+  emissiveBase: 0.30,
+  emissiveGain: 0.52,
+  ring: true,
+  haloFixed: AMAAM_HALO,
+  haloBase: 0.44,
+  haloGain: 0.40,
+  haloPulse: 0.15,
+  haloRate: 1.5,        // a slow, heavy warning pulse, ~4x slower than an emeem's
+  hoverY: 0.27,         // hangs low: heavy, and easier to hop over
+  bobHeight: 0.15,
+  bobSpeed: num(E.bobSpeed, 2.1) * 0.42,
+  spinSpeed: num(E.spinSpeed, 1.4) * 0.45,
+  lurch: 0.34,          // the precession stumbles instead of gliding
+  heavyBob: true,
+  tilt: 0.62,           // lolls much further off vertical than a prize
+  popTime: 0.34,        // a slower death than a prize: it deflates, not pops
+  burstTime: 0.46,
+  geo: { segW: 9, segH: 6, squash: 0.22, tipR: 0.56, tipSegW: 9, tipSegH: 5, tipSquash: 0.36, tipLift: 0.62 },
+});
+
+const KIND_LIST = [EMEEM, RUNNER, AMAAM];
+const KIND_WEIGHT_TOTAL = KIND_LIST.reduce((a, k) => a + k.weight, 0) || 1;
+
+// ------------------------------------------------------------- field sizing
 
 /**
  * Pool size covers the whole streamed area (perChunk per chunk across the
@@ -73,8 +311,8 @@ const POOL_SIZE = Math.max(
 
 /**
  * Spawn ring, in metres from the player. The near edge is far enough out that
- * an Emeem never pops into existence inside your field of view; the far edge
- * sits where calm fog still leaves it readable (fogFar * 0.3 == 45m shipped).
+ * a collectible never pops into existence inside your field of view; the far
+ * edge sits where calm fog still leaves it readable (fogFar * 0.3 == 45m).
  */
 const RING_MIN = 12;
 const RING_MAX = Math.max(RING_MIN + 8, CONFIG.world.fogFar * 0.3);
@@ -85,7 +323,14 @@ const SEED_RING_MIN = 5;
 const SEED_RING_MIN2 = SEED_RING_MIN * SEED_RING_MIN;
 
 /**
- * Recycle radius. Comfortably past the ring so an Emeem you sprinted past
+ * ...but never an AMAAM that close. Being handed a penalty inside the first
+ * stride, before the player has even seen one, teaches nothing. Inside this
+ * radius the weighted draw falls back to a plain emeem.
+ */
+const AMAAM_MIN_SPAWN_R = 11;
+
+/**
+ * Recycle radius. Comfortably past the ring so a collectible you sprinted past
  * lingers behind you for a few seconds instead of blinking out on screen.
  */
 const DESPAWN_R = RING_MAX + 25;
@@ -105,51 +350,63 @@ const SPAWNS_PER_FRAME = 3;
 const SPAWN_TRIES = 5;
 const SEED_TRIES = 12;
 
-/** Clearance box tested against world colliders before a spawn is accepted. */
-const CLEAR_XZ = E.radius + 0.55;
-const CLEAR_Y = E.hoverY + E.bobHeight + E.radius;
-
-/**
- * Vertical grab window, relative to the player's FEET. An Emeem hovers hoverY
- * above whatever ground it sits on, so on flat ground the gap is exactly
- * hoverY. Reaching DOWN as far as hoverY + player.radius keeps an Emeem beside
- * a low kerb grabbable; reaching UP as far as player.height + hoverY lets you
- * snatch one at the apex of a jump (apex = jumpVelocity^2 / 2|gravity| = 1.47m)
- * while still refusing to vacuum the ground from the roof of a 4m block.
- */
-const PICK_Y_MIN = -(E.hoverY + CONFIG.player.radius);
-const PICK_Y_MAX = CONFIG.player.height + E.hoverY;
-const PICK_R2 = E.pickupRadius * E.pickupRadius;
 const MAGNET_R = E.magnetRadius;
 const MAGNET_R2 = MAGNET_R * MAGNET_R;
 
-/** Halo billboard size, and the pop animation the disc plays when collected. */
-// Deliberately a larger multiple than it was: the disc got much smaller, and
-// the halo is what makes an emeem findable at 40m through fog. It carries the
-// visibility now, so it does not scale down one-for-one with the disc.
-const GLOW_SCALE = E.radius * 7.5;
-const POP_TIME = 0.24;
+/**
+ * Nothing may spawn inside an amaam's kill radius. Without this a prize can
+ * land in the one place you cannot reach it from, which reads as the game
+ * cheating rather than as a decision you got wrong. The keep-out is the amaam's
+ * pickup radius plus the candidate's own, so the two circles never touch.
+ */
+function amaamKeepOut(kind) {
+  return AMAAM.pickupRadius + (kind.prize ? kind.pickupRadius : 0.7);
+}
 
-/** Additive one-shot particles fired on pickup. */
-const BURSTS = 8;
-const BURST_TIME = 0.38;
-const BURST_MIN = E.radius * 2.4;
-const BURST_MAX = E.radius * 9.0;
-
-// ------------------------------------------------------------------- glow map
-let _glowTexture = null;
+// -------------------------------------------------------------- runner rules
 
 /**
- * Soft radial falloff for the halo and the pickup burst, built as a DataTexture
- * rather than a 2D canvas: no DOM, so it works identically under the headless
- * smoke test, and 64x64 RGBA is 16KB of upload once.
- *
- * The alpha is a wide quadratic shoulder plus a tight hot core, which gives a
- * bloom-ish look without any post-processing (we cannot afford a bloom pass on
- * a mobile GPU that also has to draw shadows).
+ * How far a runner may get from where it spawned before it is pulled back.
+ * Without a tether it would simply flee down the -Z corridor forever, cross
+ * DESPAWN_R and evaporate the moment you noticed it - so the rarest, most
+ * valuable thing in the game would be the one thing you could never catch.
+ * Tethered, a cornered runner curls back across your path, which is exactly the
+ * moment you want: cut the corner instead of chasing the tail.
  */
-function getGlowTexture() {
-  if (_glowTexture) return _glowTexture;
+const TETHER_R = 8.0;
+const TETHER_SPAN = 5.0;
+
+/** Look-ahead for the obstacle probe, on top of the runner's own clearance box. */
+const PROBE_AHEAD = 1.15;
+/** How hard it swerves when the way ahead is blocked. */
+const PROBE_TURN = 0.9;
+/** Seconds a swerve is committed to, so it cannot dither in a doorway. */
+const AVOID_HOLD = 0.32;
+/** Runners give amaams a wide berth; a prize parked on a hazard is uncatchable. */
+const AMAAM_AVOID_R = 2.8;
+const AMAAM_AVOID_R2 = AMAAM_AVOID_R * AMAAM_AVOID_R;
+/** Probe intervals. Fast enough that it can never step past its own look-ahead. */
+const PROBE_FLEE = 0.12;
+const PROBE_CALM = 0.30;
+
+/** Additive one-shot particles fired on pickup. */
+const BURSTS = 10;
+/** Two flavours: a bright expanding flash, and a dull inward collapse. */
+const BURST_POP = 0;
+const BURST_COLLAPSE = 1;
+
+// ------------------------------------------------------------------- glow maps
+let _glowTexture = null;
+let _ringTexture = null;
+
+/**
+ * Builds a 64x64 RGBA alpha map as a DataTexture rather than via a 2D canvas:
+ * no DOM, so it works identically under the headless smoke test, and it is
+ * 16KB of upload once.
+ *
+ * @param {(r:number) => number} falloff alpha as a function of radius 0..1
+ */
+function buildAlphaTexture(falloff) {
   const S = 64;
   const data = new Uint8Array(S * S * 4);
   const c = (S - 1) * 0.5;
@@ -159,12 +416,7 @@ function getGlowTexture() {
       const dx = (x - c) * inv;
       const dy = (y - c) * inv;
       const r = Math.sqrt(dx * dx + dy * dy);
-      let a = 0;
-      if (r < 1) {
-        const shoulder = (1 - r) ** 2.2 * 0.7;
-        const core = Math.max(0, 1 - r * 2.6) ** 3 * 0.55;
-        a = Math.min(1, shoulder + core);
-      }
+      const a = r < 1 ? Math.min(1, Math.max(0, falloff(r))) : 0;
       const i = (y * S + x) * 4;
       data[i] = 255;
       data[i + 1] = 255;
@@ -181,19 +433,48 @@ function getGlowTexture() {
   tex.wrapT = THREE.ClampToEdgeWrapping;
   tex.generateMipmaps = false;
   tex.needsUpdate = true;
-  _glowTexture = tex;
   return tex;
 }
 
 /**
- * Builds the Emeem field.
- *
- * @param {object} ctx - { THREE, CONFIG, state, bus, scene, camera, renderer,
- *                         engine, world, audio, addScore }. `ctx.world` and
- *                         `ctx.audio` are null at construction time, so nothing
- *                         below dereferences them until update()/reset().
- * @returns {{group: THREE.Group, update: Function, reset: Function}}
+ * The prize halo: a wide quadratic shoulder plus a tight hot core, which gives
+ * a bloom-ish look without any post-processing (we cannot afford a bloom pass
+ * on a mobile GPU that also has to draw shadows).
  */
+function getGlowTexture() {
+  if (!_glowTexture) {
+    _glowTexture = buildAlphaTexture((r) => {
+      const shoulder = (1 - r) ** 2.2 * 0.7;
+      const core = Math.max(0, 1 - r * 2.6) ** 3 * 0.55;
+      return shoulder + core;
+    });
+  }
+  return _glowTexture;
+}
+
+/**
+ * The hazard halo: an ANNULUS. This is the single most important texel in the
+ * game. A prize is a bright blob with a bright middle; an amaam is a cold ring
+ * around a dead centre. That difference survives being six pixels wide, being
+ * seen out of the corner of an eye, and being seen through fog - which size,
+ * shape and shading all do not.
+ *
+ * A whisper of haze is left in the middle so the ring reads as something
+ * sitting there rather than as a hole punched in the world.
+ */
+function getRingTexture() {
+  if (!_ringTexture) {
+    _ringTexture = buildAlphaTexture((r) => {
+      const band = (r - 0.60) / 0.19;
+      const ring = Math.exp(-band * band) * 0.95;
+      const haze = (1 - r) ** 3 * 0.10;
+      // Force it to zero before the sprite's edge, or the band clips square.
+      return (ring + haze) * Math.min(1, (1 - r) * 6);
+    });
+  }
+  return _ringTexture;
+}
+
 /**
  * Bakes a flat greyscale multiplier into a geometry's vertex colours, so parts
  * merged into one buffer can still be shaded differently under one material.
@@ -205,87 +486,115 @@ function paintVertexColor(geo, shade) {
   geo.setAttribute('color', new THREE.BufferAttribute(arr, 3));
 }
 
+/**
+ * A collectible is a flattened base with a raised centrepiece.
+ *
+ * The two parts are merged into ONE geometry and told apart by a baked vertex
+ * colour: white on the base, `tipShade` grey on the centrepiece. The material's
+ * own colour multiplies through it, so a single material and a single draw call
+ * still give a two-tone object, and every tone of a kind shares one geometry.
+ * With ~80 of these live, a second draw call each would not be free.
+ */
+function buildKindGeometry(kind) {
+  const g = kind.geo;
+  const baseGeo = new THREE.SphereGeometry(kind.radius, g.segW, g.segH);
+  // Bake the squash into the vertices instead of using mesh.scale, so mesh.scale
+  // stays free for the pickup animation.
+  baseGeo.scale(1, g.squash, 1);
+
+  const tipGeo = new THREE.SphereGeometry(kind.radius * g.tipR, g.tipSegW, g.tipSegH);
+  tipGeo.scale(1, g.tipSquash, 1);
+  // Sunk slightly so the centrepiece grows out of the base rather than
+  // balancing on it.
+  tipGeo.translate(0, kind.radius * g.squash * g.tipLift, 0);
+
+  paintVertexColor(baseGeo, 1);
+  paintVertexColor(tipGeo, kind.tipShade);
+
+  const merged = mergeGeometries([baseGeo, tipGeo], false);
+  baseGeo.dispose();
+  tipGeo.dispose();
+  merged.computeBoundingSphere();
+  return merged;
+}
+
+/**
+ * Builds the collectible field.
+ *
+ * @param {object} ctx - { THREE, CONFIG, state, bus, scene, camera, renderer,
+ *                         engine, world, audio, addScore }. `ctx.world` and
+ *                         `ctx.audio` are null at construction time, so nothing
+ *                         below dereferences them until update()/reset().
+ * @returns {{group: THREE.Group, update: Function, reset: Function}}
+ */
 export function createEmeems(ctx) {
   const group = new THREE.Group();
   group.name = 'emeems';
 
   // ------------------------------------------------------------- shared assets
-  // One geometry, one texture, one material per palette colour. Every pooled
-  // mesh points at these; activating an Emeem just swaps which material it
-  // references, and all six compile to the same shader program so there is no
-  // recompile hitch mid-run.
-  /**
-   * An Emeem is a flattened circular base with a small raised tip at its centre.
-   *
-   * The two parts are merged into ONE geometry and told apart by a baked vertex
-   * colour: white on the base, `emeemTipShade` grey on the tip. The material's
-   * own colour multiplies through it, so a single material and a single draw
-   * call still give a two-tone object, and all six tones share one geometry.
-   * With ~80 of these live, a second draw call each would not be free.
-   */
-  const baseGeo = new THREE.SphereGeometry(E.radius, 20, 12);
-  // Bake the squash into the vertices instead of using mesh.scale, so mesh.scale
-  // stays free (and uniform) for the pickup pop animation.
-  baseGeo.scale(1, 0.30, 1);
-
-  const TIP_R = E.radius * 0.30;
-  const tipGeo = new THREE.SphereGeometry(TIP_R, 14, 10);
-  tipGeo.scale(1, 1.25, 1);
-  // Sunk slightly so the tip grows out of the base rather than balancing on it.
-  tipGeo.translate(0, E.radius * 0.30 * 0.72, 0);
-
-  paintVertexColor(baseGeo, 1);
-  paintVertexColor(tipGeo, CONFIG.palette.emeemTipShade);
-
-  const discGeo = mergeGeometries([baseGeo, tipGeo], false);
-  baseGeo.dispose();
-  tipGeo.dispose();
-  discGeo.computeBoundingSphere();
-
+  // One geometry per kind, two textures, one material per (kind, tone). Every
+  // pooled mesh points at these; activating an entry just swaps which geometry
+  // and materials it references, so a respawn as a different kind costs three
+  // property writes and no allocation.
   const glowTex = getGlowTexture();
+  const ringTex = getRingTexture();
 
-  /**
-   * Soft and matte rather than candy-glossy. A little emissive is kept purely
-   * for findability: at high dread the fog far plane closes to ~51m and a fully
-   * matte object at that range is indistinguishable from the ground.
-   */
-  const discMats = COLORS.map((hex) => new THREE.MeshStandardMaterial({
-    color: hex,
-    vertexColors: true,
-    roughness: 0.62,
-    metalness: 0.0,
-    emissive: hex,
-    emissiveIntensity: 0.16,
-  }));
+  /** @type {Record<string, {geo:THREE.BufferGeometry, disc:THREE.Material[], halo:THREE.SpriteMaterial[]}>} */
+  const art = {};
+  for (let i = 0; i < KIND_LIST.length; i++) {
+    const k = KIND_LIST[i];
+    /**
+     * Soft and matte rather than candy-glossy. A little emissive is kept purely
+     * for findability: at high dread the fog far plane closes to ~51m and a
+     * fully matte object at that range is indistinguishable from the ground.
+     */
+    const disc = k.colors.map((hex) => new THREE.MeshStandardMaterial({
+      color: hex,
+      vertexColors: true,
+      roughness: k.roughness,
+      metalness: 0.0,
+      emissive: k.emissiveHex || hex,
+      emissiveIntensity: k.emissiveBase,
+      flatShading: k.flat,
+    }));
 
-  /**
-   * The halo deliberately has `fog: false`. The disc itself is fogged - it is a
-   * physical object in the world and should recede - but the halo is allowed to
-   * punch through, so at max dread (fog far plane closes to 51m) an Emeem at
-   * 45m is still a coloured pinprick in the murk instead of nothing at all.
-   * depthTest stays on so the halo is correctly hidden behind obstacles.
-   */
-  const glowMats = COLORS.map((hex) => new THREE.SpriteMaterial({
-    map: glowTex,
-    color: hex,
-    transparent: true,
-    opacity: 0.30,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    fog: false,
-    toneMapped: false,
-  }));
+    /**
+     * The halo deliberately has `fog: false`. The disc itself is fogged - it is
+     * a physical object in the world and should recede - but the halo is
+     * allowed to punch through, so at max dread (fog far plane closes to 51m)
+     * a collectible at 45m is still a coloured pinprick in the murk instead of
+     * nothing at all. depthTest stays on so the halo is correctly hidden behind
+     * obstacles.
+     */
+    const halo = k.colors.map((hex) => new THREE.SpriteMaterial({
+      map: k.ring ? ringTex : glowTex,
+      color: k.haloFixed || hex,
+      transparent: true,
+      opacity: k.haloBase,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      fog: false,
+      toneMapped: false,
+    }));
+
+    art[k.id] = { geo: buildKindGeometry(k), disc, halo };
+  }
 
   // ------------------------------------------------------------------- pooling
   /**
-   * @type {Array<{mesh:THREE.Mesh, glow:THREE.Sprite, active:boolean,
-   *               basePos:THREE.Vector3, phase:number, colorIndex:number,
-   *               respawnAt:number, pop:number}>}
+   * @type {Array<{mesh:THREE.Mesh, glow:THREE.Sprite, active:boolean, kind:object,
+   *               art:object, basePos:THREE.Vector3, phase:number,
+   *               colorIndex:number, respawnAt:number, pop:number,
+   *               listIdx:number, homeX:number, homeZ:number, heading:number,
+   *               wanderBase:number, speed:number, probe:number,
+   *               avoidT:number, avoidAng:number}>}
    */
   const pool = new Array(POOL_SIZE);
   for (let i = 0; i < POOL_SIZE; i++) {
-    const ci = i % COLORS.length;
-    const mesh = new THREE.Mesh(discGeo, discMats[ci]);
+    const k = EMEEM;
+    const a = art[k.id];
+    const ci = i % k.colors.length;
+    const mesh = new THREE.Mesh(a.geo, a.disc[ci]);
     // No shadow casting: 20+ extra casters would eat a meaningful slice of a
     // single 1024 shadow map that is really there for the player and monster.
     // The halo is what visually plants them on the ground.
@@ -293,7 +602,7 @@ export function createEmeems(ctx) {
     mesh.receiveShadow = false;
     mesh.visible = false;
 
-    const glow = new THREE.Sprite(glowMats[ci]);
+    const glow = new THREE.Sprite(a.halo[ci]);
     glow.visible = false;
     glow.renderOrder = 2;
 
@@ -304,12 +613,48 @@ export function createEmeems(ctx) {
       mesh,
       glow,
       active: false,
+      kind: k,
+      art: a,
       basePos: new THREE.Vector3(),
       phase: 0,
       colorIndex: ci,
       respawnAt: 0,
-      pop: 0, // > 0 while playing the collect animation: rendered, not collectable
+      pop: 0,          // > 0 while playing the collect animation: drawn, not collectable
+      listIdx: -1,     // slot in amaamList, or -1
+      // runner-only state, inert for the still kinds
+      homeX: 0,
+      homeZ: 0,
+      heading: 0,
+      wanderBase: 0,
+      speed: 0,
+      probe: 0,
+      avoidT: 0,
+      avoidAng: 0,
     };
+  }
+
+  /**
+   * Live amaams, kept as a compacted list so the spawn keep-out test and the
+   * runners' hazard-avoidance are O(amaams) rather than O(pool). Removal is
+   * swap-with-last using the index stored on the entry, so it never allocates
+   * and never walks the list.
+   */
+  const amaamList = [];
+
+  function amaamAdd(e) {
+    e.listIdx = amaamList.length;
+    amaamList.push(e);
+  }
+
+  function amaamRemove(e) {
+    const i = e.listIdx;
+    if (i < 0) return;
+    e.listIdx = -1;
+    const last = amaamList.pop();
+    if (last !== e) {
+      amaamList[i] = last;
+      last.listIdx = i;
+    }
   }
 
   // Pickup bursts get their own materials because they each need an independent
@@ -329,7 +674,7 @@ export function createEmeems(ctx) {
     sprite.visible = false;
     sprite.renderOrder = 3;
     group.add(sprite);
-    bursts[i] = { sprite, mat, life: 0 };
+    bursts[i] = { sprite, mat, life: 0, time: 0.38, from: 0, to: 1, mode: BURST_POP, map: glowTex };
   }
 
   let activeCount = 0;
@@ -341,11 +686,40 @@ export function createEmeems(ctx) {
 
   // ------------------------------------------------------------------ helpers
 
-  function activate(e, x, groundY, z) {
-    e.colorIndex = (Math.random() * COLORS.length) | 0;
-    e.mesh.material = discMats[e.colorIndex];
-    e.glow.material = glowMats[e.colorIndex];
-    e.basePos.set(x, groundY + E.hoverY, z);
+  /**
+   * Weighted draw over CONFIG.emeem.kinds. `r` is the candidate's distance from
+   * the player, which is the one thing that can veto the draw: no amaam ever
+   * appears close enough to be unavoidable.
+   */
+  function pickKind(r) {
+    let roll = Math.random() * KIND_WEIGHT_TOTAL;
+    for (let i = 0; i < KIND_LIST.length; i++) {
+      roll -= KIND_LIST[i].weight;
+      if (roll <= 0) {
+        const k = KIND_LIST[i];
+        if (k === AMAAM && r < AMAAM_MIN_SPAWN_R) return EMEEM;
+        return k;
+      }
+    }
+    return EMEEM;
+  }
+
+  function activate(e, kind, x, groundY, z) {
+    const a = art[kind.id];
+    e.kind = kind;
+    e.art = a;
+    // Tag the mesh with its kind. Nothing in the game reads this - it exists so
+    // the field is inspectable from outside, which is what lets the feature
+    // tests assert that all three kinds actually spawn, that runners actually
+    // move, and that the hand's reach target is never an amaam. Without it those
+    // rules can only be checked by reading the code that implements them.
+    e.mesh.userData.kind = kind.id;
+    e.glow.userData.kind = kind.id;
+    e.colorIndex = (Math.random() * kind.colors.length) | 0;
+    e.mesh.geometry = a.geo;
+    e.mesh.material = a.disc[e.colorIndex];
+    e.glow.material = a.halo[e.colorIndex];
+    e.basePos.set(x, groundY + kind.hoverY, z);
     e.phase = Math.random() * TAU; // per-entry so the field never bobs in lockstep
     e.active = true;
     e.pop = 0;
@@ -353,26 +727,68 @@ export function createEmeems(ctx) {
     e.mesh.position.copy(e.basePos);
     e.mesh.visible = true;
     e.glow.position.copy(e.basePos);
-    e.glow.scale.setScalar(GLOW_SCALE);
+    e.glow.scale.setScalar(kind.glowScale);
     e.glow.visible = true;
+
+    // Runner state. Tethered to where it was born; heading and meander seeded
+    // per entry so a pair spawned in the same frame do not move as one.
+    e.homeX = x;
+    e.homeZ = z;
+    e.heading = Math.random() * TAU;
+    e.wanderBase = e.heading;
+    e.speed = kind.wanderSpeed;
+    e.probe = Math.random() * PROBE_CALM; // stagger the probes across the pool
+    e.avoidT = 0;
+    e.avoidAng = 0;
+
+    if (kind === AMAAM) amaamAdd(e);
     activeCount++;
+  }
+
+  /** Drops an entry out of the live set without touching its visuals. */
+  function deactivate(e) {
+    if (e.active) activeCount--;
+    e.active = false;
+    amaamRemove(e);
   }
 
   /** Returns an entry to the pool immediately (out of range, or reset). */
   function retire(e) {
-    if (e.active) activeCount--;
-    e.active = false;
+    deactivate(e);
     e.pop = 0;
     e.mesh.visible = false;
     e.glow.visible = false;
     e.mesh.scale.setScalar(1);
   }
 
+  /** True if a hovering collectible of this kind would be embedded in a prop. */
+  function blockedAt(world, x, z, kind) {
+    if (!world) return false;
+    const gy = world.sampleGroundY(x, z);
+    _min.set(x - kind.clearXZ, gy + 0.05, z - kind.clearXZ);
+    _max.set(x + kind.clearXZ, gy + kind.clearY, z + kind.clearXZ);
+    return world.queryAABB(_min, _max, _hits).length > 0;
+  }
+
+  /** True if (x, z) falls inside the keep-out circle of any live amaam. */
+  function nearAmaam(x, z, kind) {
+    const r = amaamKeepOut(kind);
+    const r2 = r * r;
+    for (let i = 0; i < amaamList.length; i++) {
+      const b = amaamList[i].basePos;
+      const dx = x - b.x;
+      const dz = z - b.z;
+      if (dx * dx + dz * dz < r2) return true;
+    }
+    return false;
+  }
+
   /**
    * Picks a ground point on the ring around (px, pz), rejects it if it is
-   * inside an obstacle or sitting on the monster, and activates `e` there.
-   * Tries a handful of candidates and gives up - a congested frame simply
-   * spawns fewer Emeems, it never stalls the loop.
+   * inside an obstacle, sitting on the monster, or inside an amaam's kill
+   * radius, and activates `e` there. Tries a handful of candidates and gives
+   * up - a congested frame simply spawns fewer collectibles, it never stalls
+   * the loop.
    */
   function trySpawn(e, px, pz, s, world, minR2, tries) {
     const mx = s.monster.pos.x;
@@ -384,7 +800,8 @@ export function createEmeems(ctx) {
       // Triangular distribution on [-1,1] peaked at 0: two cheap randoms, no
       // trig-heavy sampling. angle 0 == straight ahead (-Z), so roughly 55% of
       // spawns land in the forward 120 degree cone and almost none directly
-      // behind. That is the whole "keep running forward" incentive.
+      // behind. That is the whole "keep running forward" incentive - and, now,
+      // the whole reason running forward is also dangerous.
       const tri = Math.random() + Math.random() - 1;
       const ang = tri * Math.PI;
       // sqrt-lerp of the squared radii gives a uniform area distribution;
@@ -397,53 +814,80 @@ export function createEmeems(ctx) {
       const ddz = z - mz;
       if (ddx * ddx + ddz * ddz < monsterKeepOut2) continue; // no bait in its jaws
 
+      const kind = pickKind(r);
+      if (nearAmaam(x, z, kind)) continue;
+      // Swept volume of the hovering, bobbing collectible. Anything overlapping
+      // it means this one would be embedded in a prop and unreachable.
+      if (blockedAt(world, x, z, kind)) continue;
+
       const gy = world ? world.sampleGroundY(x, z) : CONFIG.world.groundY;
-
-      if (world) {
-        // Swept volume of the hovering, bobbing disc. Anything overlapping it
-        // means the Emeem would be embedded in a rock and unreachable.
-        _min.set(x - CLEAR_XZ, gy + 0.05, z - CLEAR_XZ);
-        _max.set(x + CLEAR_XZ, gy + CLEAR_Y, z + CLEAR_XZ);
-        if (world.queryAABB(_min, _max, _hits).length > 0) continue;
-      }
-
-      activate(e, x, gy, z);
+      activate(e, kind, x, gy, z);
       return true;
     }
     return false;
   }
 
-  function spawnBurst(x, y, z, color) {
+  function spawnBurst(x, y, z, color, kind) {
     const b = bursts[burstCursor];
     burstCursor = (burstCursor + 1) % BURSTS;
     if (b.life <= 0) burstsAlive++;
-    b.life = BURST_TIME;
+
+    const collapse = !kind.prize;
+    const map = collapse ? ringTex : glowTex;
+    if (b.map !== map) {
+      b.map = map;
+      b.mat.map = map;
+      // Same texture format and the same MAP define either way, so this is a
+      // program-cache hit, not a recompile. It happens once per pickup.
+      b.mat.needsUpdate = true;
+    }
+
+    b.mode = collapse ? BURST_COLLAPSE : BURST_POP;
+    b.time = kind.burstTime;
+    b.life = b.time;
     b.mat.color.setHex(color);
-    b.mat.opacity = 0.95;
+    if (collapse) {
+      // Starts as a ring wider than the amaam's own halo and crushes inward:
+      // the hazard closing over you, not a prize blooming out of you.
+      b.from = kind.glowScale * 1.35;
+      b.to = kind.radius * 0.8;
+      b.mat.opacity = 0.5;
+    } else {
+      b.from = kind.radius * 2.4;
+      b.to = kind.radius * 9.0;
+      b.mat.opacity = 0.95;
+    }
     b.sprite.position.set(x, y, z);
-    b.sprite.scale.setScalar(BURST_MIN);
+    b.sprite.scale.setScalar(b.from);
     b.sprite.visible = true;
   }
 
   function collect(e, s) {
+    const k = e.kind;
     const p = e.mesh.position;
-    const color = COLORS[e.colorIndex];
-    spawnBurst(p.x, p.y, p.z, color);
+    const color = k.colors[e.colorIndex];
+    spawnBurst(p.x, p.y, p.z, k.prize ? color : (k.haloFixed || color), k);
 
-    // Uncollectable from here on, but still drawn for POP_TIME.
-    activeCount--;
-    e.active = false;
-    e.pop = POP_TIME;
-    e.respawnAt = s.time + Math.max(E.respawnDelay, POP_TIME + 0.05);
+    // Uncollectable from here on, but still drawn for popTime.
+    deactivate(e);
+    e.pop = k.popTime;
+    e.respawnAt = s.time + Math.max(E.respawnDelay, k.popTime + 0.05);
 
-    if (typeof ctx.addScore === 'function') ctx.addScore(1);
+    if (typeof ctx.addScore === 'function') ctx.addScore(k.points);
     if (ctx.bus) {
-      // Fresh Vector3 on purpose: listeners (audio, future VFX) may keep it.
+      // Fresh Vector3 on purpose: listeners (audio, HUD, future VFX) may keep
+      // it. `kind` and `points` are what let the HUD and the audio react to a
+      // penalty differently from a prize - they must never have to infer it.
       ctx.bus.emit('collect', {
         position: new THREE.Vector3(p.x, p.y, p.z),
         color,
         score: s.score,
+        kind: k.id,
+        points: k.points,
       });
+      // A jolt on a penalty and nothing on a prize. Half the job of telling the
+      // player they just made a mistake is done before they have looked down.
+      if (!k.prize) ctx.bus.emit('shake', { amount: 0.42 });
     }
   }
 
@@ -460,7 +904,7 @@ export function createEmeems(ctx) {
   }
 
   /**
-   * Emeems have to stay findable as the world darkens, so their own emissive
+   * Collectibles have to stay findable as the world darkens, so their emissive
    * and their halo both ride `dread`. Both are plain uniform writes - no
    * needsUpdate, no shader recompile - but they still only run when dread has
    * actually moved.
@@ -468,11 +912,139 @@ export function createEmeems(ctx) {
   function applyDread(d) {
     if (Math.abs(d - lastDread) < 0.01) return;
     lastDread = d;
-    const emissive = 0.38 + 0.72 * d;
-    const halo = 0.42 + 0.36 * d;
-    for (let i = 0; i < discMats.length; i++) {
-      discMats[i].emissiveIntensity = emissive;
-      glowMats[i].opacity = halo;
+    for (let i = 0; i < KIND_LIST.length; i++) {
+      const k = KIND_LIST[i];
+      const a = art[k.id];
+      const emissive = k.emissiveBase + k.emissiveGain * d;
+      const halo = k.haloBase + k.haloGain * d;
+      for (let j = 0; j < a.disc.length; j++) {
+        a.disc[j].emissiveIntensity = emissive;
+        a.halo[j].opacity = halo;
+      }
+    }
+  }
+
+  // ----------------------------------------------------------- runner motion
+
+  /**
+   * Chooses a heading for a blocked runner and commits to it for AVOID_HOLD
+   * seconds, so it swerves once instead of stuttering left-right in a gap. The
+   * side is chosen by testing both, which costs at most two extra queryAABB
+   * calls and only on the frames where it is actually about to hit something.
+   */
+  function probeSteer(e, k, want, world, px, pz) {
+    const bp = e.basePos;
+    e.avoidT = 0;
+
+    // Hazards first: a runner sitting on an amaam is a prize you cannot take.
+    for (let i = 0; i < amaamList.length; i++) {
+      const b = amaamList[i].basePos;
+      const dx = bp.x - b.x;
+      const dz = bp.z - b.z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 < AMAAM_AVOID_R2 && d2 > 1e-6) {
+        e.avoidAng = Math.atan2(dx, dz); // straight away from it
+        e.avoidT = AVOID_HOLD;
+        return;
+      }
+    }
+
+    if (!world) return;
+
+    const reach = PROBE_AHEAD + k.speed * 0.12;
+    const ax = bp.x + Math.sin(want) * reach;
+    const az = bp.z + Math.cos(want) * reach;
+    if (!blockedAt(world, ax, az, k)) return;
+
+    // Blocked. Prefer the side that also keeps it away from the player, so a
+    // cornered runner breaks past you rather than into you - that is the moment
+    // that makes cutting one off feel earned.
+    const toPlayer = Math.atan2(px - bp.x, pz - bp.z);
+    const first = wrapPi(want + PROBE_TURN - toPlayer);
+    const second = wrapPi(want - PROBE_TURN - toPlayer);
+    const a1 = Math.abs(first) >= Math.abs(second) ? want + PROBE_TURN : want - PROBE_TURN;
+    const a2 = a1 === want + PROBE_TURN ? want - PROBE_TURN : want + PROBE_TURN;
+
+    const x1 = bp.x + Math.sin(a1) * reach;
+    const z1 = bp.z + Math.cos(a1) * reach;
+    if (!blockedAt(world, x1, z1, k)) {
+      e.avoidAng = a1;
+      e.avoidT = AVOID_HOLD;
+      return;
+    }
+    const x2 = bp.x + Math.sin(a2) * reach;
+    const z2 = bp.z + Math.cos(a2) * reach;
+    e.avoidAng = blockedAt(world, x2, z2, k) ? want + Math.PI : a2;
+    e.avoidT = AVOID_HOLD;
+  }
+
+  /**
+   * One runner, one step. Drifts when calm, bolts when you close, turns no
+   * faster than turnRate, stays inside its tether, stays out of props, and
+   * stays flat on the ground plane.
+   *
+   * `d2` is its squared horizontal distance to the player, already computed by
+   * the caller for the despawn test.
+   */
+  function stepRunner(e, k, dt, t, px, pz, d2, world) {
+    const bp = e.basePos;
+    const alarmed = d2 < k.fleeR2;
+
+    // 1. What it would like to do.
+    let want;
+    if (alarmed) {
+      want = Math.atan2(bp.x - px, bp.z - pz);      // directly away from you
+    } else {
+      // A slow sinusoidal meander around the heading it was born with. Cheap,
+      // deterministic per entry, and it never wanders off in a straight line.
+      want = e.wanderBase + Math.sin(t * 0.37 + e.phase) * 1.7;
+    }
+
+    // 2. An in-flight swerve overrides that, then decays.
+    e.probe -= dt;
+    if (e.probe <= 0) {
+      e.probe = alarmed ? PROBE_FLEE : PROBE_CALM;
+      probeSteer(e, k, want, world, px, pz);
+    }
+    if (e.avoidT > 0) {
+      e.avoidT -= dt;
+      want = e.avoidAng;
+    }
+
+    // 3. The tether always gets the last word, so it can never leave the field.
+    const hx = e.homeX - bp.x;
+    const hz = e.homeZ - bp.z;
+    const hd2 = hx * hx + hz * hz;
+    if (hd2 > TETHER_R * TETHER_R) {
+      const hd = Math.sqrt(hd2);
+      const w = Math.min(1, (hd - TETHER_R) / TETHER_SPAN);
+      want += wrapPi(Math.atan2(hx, hz) - want) * w;
+    }
+
+    // 4. Turn toward it at a finite rate. THIS is what makes a runner catchable:
+    //    it cannot reverse on the spot, so a player who reads the arc and cuts
+    //    across it beats a player who chases the tail.
+    const turn = wrapPi(want - e.heading);
+    const maxTurn = k.turnRate * dt;
+    e.heading = wrapPi(e.heading + (turn > maxTurn ? maxTurn : (turn < -maxTurn ? -maxTurn : turn)));
+
+    // 5. Ease into the bolt rather than snapping to it, so the moment it
+    //    notices you is legible.
+    const target = alarmed ? k.speed : k.wanderSpeed;
+    e.speed += (target - e.speed) * (1 - Math.exp(-6 * dt));
+
+    // Inside the magnet it goes limp, and the closer it gets the limper, so the
+    // pincer wins the tug-of-war instead of fighting the flee for a full second.
+    let damp = 1;
+    if (d2 < MAGNET_R2) damp = Math.sqrt(d2) / MAGNET_R;
+
+    const step = e.speed * dt * damp;
+    bp.x += Math.sin(e.heading) * step;
+    bp.z += Math.cos(e.heading) * step;
+    // Pinned to the ground plane. Skipped inside the magnet radius, where the
+    // magnet owns the height and is lifting it into the claw.
+    if (d2 >= MAGNET_R2) {
+      bp.y = (world ? world.sampleGroundY(bp.x, bp.z) : CONFIG.world.groundY) + k.hoverY;
     }
   }
 
@@ -489,18 +1061,33 @@ export function createEmeems(ctx) {
     const py = s.player.pos.y; // FEET
     const pz = s.player.pos.z;
     const t = s.time;
+    // Runners freeze the moment the run is over. main.js keeps calling update()
+    // after a death so the pickup you dived for finishes its animation; a field
+    // of prizes scattering behind the game-over card is not part of that.
+    const simulate = s.phase === 'playing';
 
-    // Nearest reachable Emeem, for the hand's reach-and-grab. We are already
+    const gp = s.player.grabPoint;
+    const gx = gp ? gp.x : px;
+    const gy = gp ? gp.y : py + E.hoverY;
+    const gz = gp ? gp.z : pz;
+
+    // Nearest reachable PRIZE, for the hand's reach-and-grab. We are already
     // walking the whole pool and computing each horizontal distance for the
     // magnet and pickup, so tracking the minimum costs one compare per entry
     // and saves player.js from doing the same sweep a second time.
+    //
+    // Amaams are excluded on purpose and it is not a detail: player.js opens
+    // the claw at whatever this points to, and a hand reaching lovingly for the
+    // thing that costs you two points would be teaching the exact opposite of
+    // what the amaam exists to teach.
     let nearD2 = Infinity;
     let nearE = null;
 
     for (let i = 0; i < POOL_SIZE; i++) {
       const e = pool[i];
+      const k = e.kind;
 
-      // --- collect animation: expand, spin up, snap out of existence --------
+      // --- collect animation ------------------------------------------------
       if (e.pop > 0) {
         e.pop -= dt;
         if (e.pop <= 0) {
@@ -510,23 +1097,43 @@ export function createEmeems(ctx) {
           e.mesh.scale.setScalar(1);
           continue;
         }
-        const p = 1 - e.pop / POP_TIME;
-        // A small flare, then crushed out of existence - NOT a bloom-and-float.
-        // The emeem was just pinched; it should die in the claw.
-        e.mesh.scale.setScalar((1 + 0.5 * p) * (1 - p * p));
-        // Ride the pincer while it is being crushed, so the catch reads as the
-        // hand taking it rather than the emeem escaping upward.
-        if (s.player.grabPoint) {
-          const kk = 1 - Math.exp(-20 * dt);
-          e.mesh.position.x += (s.player.grabPoint.x - e.mesh.position.x) * kk;
-          e.mesh.position.y += (s.player.grabPoint.y - e.mesh.position.y) * kk;
-          e.mesh.position.z += (s.player.grabPoint.z - e.mesh.position.z) * kk;
+        const p = 1 - e.pop / k.popTime;
+        if (k.prize) {
+          // A small flare, then crushed out of existence - NOT a bloom-and-float.
+          // It was just pinched; it should die in the claw.
+          e.mesh.scale.setScalar((1 + 0.5 * p) * (1 - p * p));
+          // Ride the pincer while it is being crushed, so the catch reads as the
+          // hand taking it rather than the prize escaping upward.
+          if (gp) {
+            const kk = 1 - Math.exp(-20 * dt);
+            e.mesh.position.x += (gx - e.mesh.position.x) * kk;
+            e.mesh.position.y += (gy - e.mesh.position.y) * kk;
+            e.mesh.position.z += (gz - e.mesh.position.z) * kk;
+          } else {
+            e.mesh.position.y += dt * 1.6;
+          }
+          e.mesh.quaternion.setFromAxisAngle(AXIS_Y, t * k.spinSpeed * 4 + e.phase).multiply(k.tiltQ);
+          e.glow.position.copy(e.mesh.position);
+          e.glow.scale.setScalar(k.glowScale * (1 + 1.6 * p) * (1 - p * p * p));
         } else {
-          e.mesh.position.y += dt * 1.6;
+          // A DULL COLLAPSE. No flare, no flight, no ride into the claw: the
+          // amaam is not taken, it burst on you. It spreads, flattens to a
+          // smear and sinks into the ground while its ring shuts inward. The
+          // difference from a prize is legible in the first two frames, which
+          // is all the time a fleeing player has to notice it.
+          e.mesh.scale.set(1 + 0.62 * p, Math.max(0.03, 1 - p * 1.7), 1 + 0.62 * p);
+          e.mesh.position.set(
+            e.basePos.x,
+            e.basePos.y - k.hoverY * 1.25 * p * p,
+            e.basePos.z,
+          );
+          // Keeps lolling as it goes down, slower and slower - it deflates.
+          e.mesh.quaternion
+            .setFromAxisAngle(AXIS_Y, t * k.spinSpeed + e.phase)
+            .multiply(k.tiltQ);
+          e.glow.position.copy(e.mesh.position);
+          e.glow.scale.setScalar(k.glowScale * (1 - p) * (1 - 0.5 * p));
         }
-        e.mesh.quaternion.setFromAxisAngle(AXIS_Y, t * E.spinSpeed * 4 + e.phase).multiply(TILT_Q);
-        e.glow.position.copy(e.mesh.position);
-        e.glow.scale.setScalar(GLOW_SCALE * (1 + 1.6 * p) * (1 - p * p * p));
         continue;
       }
 
@@ -544,59 +1151,93 @@ export function createEmeems(ctx) {
         continue;
       }
 
-      // Vertical eligibility gates BOTH the magnet and the pickup, so an Emeem
-      // on the ground is not dragged up to a player standing on a tall block.
-      const rel = bp.y - py;
-      const reachable = rel > PICK_Y_MIN && rel < PICK_Y_MAX;
-
-      if (reachable && d2 < MAGNET_R2) {
-        const d = Math.sqrt(d2);
-        // Pull toward the PINCER, not the player origin: an emeem drawn to the
-        // body centre ends up hovering over the palm, which looks like it is
-        // being absorbed rather than picked up. The pickup test below still uses
-        // distance to the player, so this changes only what the eye sees.
-        const gx = s.player.grabPoint ? s.player.grabPoint.x : px;
-        const gz = s.player.grabPoint ? s.player.grabPoint.z : pz;
-        const gy = s.player.grabPoint ? s.player.grabPoint.y : py + E.hoverY;
-        // Ease strengthens toward the centre so the pull snaps rather than
-        // creeping. exp() form is frame-rate independent: same feel at 60 and
-        // 120fps, which matters because this phone can run either.
-        const ease = 1 - d / MAGNET_R;
-        const k = 1 - Math.exp(-E.magnetStrength * ease * dt);
-        bp.x += (gx - bp.x) * k;
-        bp.z += (gz - bp.z) * k;
-        // Rise to the pincer's height, so a mid-jump catch flies up into the
-        // pinch instead of clipping through the wrist.
-        bp.y += (gy - bp.y) * k;
+      // --- the runner decides where it is going ------------------------------
+      if (k.moves && simulate) {
+        stepRunner(e, k, dt, t, px, pz, d2, world);
         dx = px - bp.x;
         dz = pz - bp.z;
         d2 = dx * dx + dz * dz;
       }
 
-      // Post-magnet distance, so the claw tracks where the Emeem is being
-      // pulled to rather than where it started the frame.
-      if (reachable && d2 < nearD2) { nearD2 = d2; nearE = e; }
+      // Vertical eligibility gates the magnet, the pickup AND the reach, so a
+      // collectible on the ground is neither dragged up to, nor taken by, a
+      // player standing on a tall block.
+      const rel = bp.y - py;
+      const reachable = rel > k.pickYMin && rel < k.pickYMax;
 
-      // --- caught it --------------------------------------------------------
-      if (reachable && d2 < PICK_R2) {
-        // Commit this frame's magnet motion first: collect() reads the mesh
-        // position for the burst and for the 'collect' payload, and a stale
-        // one would put the flash a frame behind the disc you just grabbed.
-        e.mesh.position.set(bp.x, bp.y + Math.sin(t * E.bobSpeed + e.phase) * E.bobHeight, bp.z);
+      if (k.magnetic && reachable && d2 < MAGNET_R2) {
+        const d = Math.sqrt(d2);
+        // Pull toward the PINCER, not the player origin: a prize drawn to the
+        // body centre ends up hovering over the palm, which looks like it is
+        // being absorbed rather than picked up. The pickup test below still uses
+        // distance to the player, so this changes only what the eye sees.
+        // Ease strengthens toward the centre so the pull snaps rather than
+        // creeping. exp() form is frame-rate independent: same feel at 60 and
+        // 120fps, which matters because this phone can run either.
+        const ease = 1 - d / MAGNET_R;
+        const kk = 1 - Math.exp(-E.magnetStrength * ease * dt);
+        bp.x += (gx - bp.x) * kk;
+        bp.z += (gz - bp.z) * kk;
+        // Rise to the pincer's height, so a mid-jump catch flies up into the
+        // pinch instead of clipping through the wrist.
+        bp.y += (gy - bp.y) * kk;
+        dx = px - bp.x;
+        dz = pz - bp.z;
+        d2 = dx * dx + dz * dz;
+      }
+
+      // Post-magnet distance, so the claw tracks where the prize is being
+      // pulled to rather than where it started the frame.
+      if (k.prize && reachable && d2 < nearD2) { nearD2 = d2; nearE = e; }
+
+      // --- caught it (or walked into it) ------------------------------------
+      if (reachable && d2 < k.pickR2) {
+        // Commit this frame's motion first: collect() reads the mesh position
+        // for the burst and for the 'collect' payload, and a stale one would
+        // put the flash a frame behind the thing you just touched.
+        let w = Math.sin(t * k.bobSpeed + e.phase);
+        if (k.heavyBob) w = 0.62 * w + 0.38 * (w * w - 0.5);
+        e.mesh.position.set(bp.x, bp.y + w * k.bobHeight, bp.z);
         collect(e, s);
         continue;
       }
 
       // --- idle: bob, precess, halo pulse ----------------------------------
-      const y = bp.y + Math.sin(t * E.bobSpeed + e.phase) * E.bobHeight;
+      // Asymmetric for an amaam: the squared term makes it hang low and heave
+      // up briefly, where a prize rides an even sine. Heavier, and out of step
+      // with everything else on the field.
+      let w = Math.sin(t * k.bobSpeed + e.phase);
+      if (k.heavyBob) w = 0.62 * w + 0.38 * (w * w - 0.5);
+      // A fleeing runner bounces higher. Amplitude only - the bob RATE is a
+      // constant per kind, because changing it would move sin(t * rate) by
+      // whole radians once `t` is minutes deep.
+      const amp = k.moves ? k.bobHeight * (0.8 + 0.85 * (e.speed / k.speed)) : k.bobHeight;
+      const y = bp.y + w * amp;
       e.mesh.position.set(bp.x, y, bp.z);
-      e.mesh.quaternion.setFromAxisAngle(AXIS_Y, t * E.spinSpeed + e.phase).multiply(TILT_Q);
+
+      /**
+       * The disc is rotationally symmetric about its own axis, so spinning it
+       * about that axis is invisible. Instead each kind is tilted off vertical
+       * by its own angle and the tilted disc spins about WORLD Y: the face
+       * precesses, sweeping toward and away from the camera and catching the
+       * sun's specular once per revolution. That flash is what makes a prize
+       * findable in peripheral vision - and the amaam's lurching, half-speed,
+       * steeply-lolled version of it is what makes the amaam look ill.
+       */
+      let ang = t * k.spinSpeed + e.phase;
+      if (k.lurch) ang += k.lurch * Math.sin(t * 1.3 + e.phase);
+      e.mesh.quaternion.setFromAxisAngle(AXIS_Y, ang).multiply(k.tiltQ);
+
       e.glow.position.set(bp.x, y, bp.z);
-      // Halo breathes slightly out of phase with the bob: cheap life, no cost.
-      e.glow.scale.setScalar(GLOW_SCALE * (1 + 0.07 * Math.sin(t * E.bobSpeed * 1.7 + e.phase)));
+      // Halo breathes out of phase with the bob: cheap life, no cost. The rate
+      // and depth are the kind's signature - a gentle emeem breath, a fast
+      // runner twinkle, a slow heavy amaam warning.
+      e.glow.scale.setScalar(
+        k.glowScale * (1 + k.haloPulse * Math.sin(t * k.haloRate + e.phase)),
+      );
     }
 
-    // --- publish the nearest Emeem for the claw ---------------------------
+    // --- publish the nearest PRIZE for the claw ---------------------------
     // entities/player.js reads these three every frame to drive the reach and
     // the glance-toward. Distance is horizontal, matching pickupRadius.
     if (nearE) {
@@ -634,11 +1275,20 @@ export function createEmeems(ctx) {
           burstsAlive--;
           continue;
         }
-        const p = 1 - b.life / BURST_TIME;
-        // sqrt(p) expands fast then settles; (1-p)^2 fades slow then fast.
-        b.sprite.scale.setScalar(BURST_MIN + (BURST_MAX - BURST_MIN) * Math.sqrt(p));
-        b.sprite.position.y += dt * 0.9;
-        b.mat.opacity = (1 - p) * (1 - p) * 0.95;
+        const p = 1 - b.life / b.time;
+        if (b.mode === BURST_COLLAPSE) {
+          // Hangs, then crushes: p*p starts slow and finishes fast, which is
+          // what a thing caving in looks like. It sinks, and it never gets
+          // brighter than half - a prize flashes, a mistake smothers.
+          b.sprite.scale.setScalar(b.from + (b.to - b.from) * p * p);
+          b.sprite.position.y -= dt * 0.55;
+          b.mat.opacity = (1 - p) * 0.5;
+        } else {
+          // sqrt(p) expands fast then settles; (1-p)^2 fades slow then fast.
+          b.sprite.scale.setScalar(b.from + (b.to - b.from) * Math.sqrt(p));
+          b.sprite.position.y += dt * 0.9;
+          b.mat.opacity = (1 - p) * (1 - p) * 0.95;
+        }
       }
     }
   }
@@ -651,7 +1301,9 @@ export function createEmeems(ctx) {
       retire(e);
       e.respawnAt = 0;
     }
-    activeCount = 0; // retire() already decremented, but never trust drift
+    activeCount = 0;      // retire() already decremented, but never trust drift
+    amaamList.length = 0; // ...and neither does the hazard list
+    for (let i = 0; i < POOL_SIZE; i++) pool[i].listIdx = -1;
     cursor = 0;
 
     for (let i = 0; i < BURSTS; i++) {
