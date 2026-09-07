@@ -115,10 +115,16 @@ console.log('\n== touch input (real touch events, not the keyboard) ==');
   const ctrls = await page.evaluate(() => {
     const out = {};
     for (const el of document.querySelectorAll('button,[role=button],[data-dir],[class*=dpad],[class*=jump]')) {
-      const t = ((el.getAttribute('aria-label') || '') + ' ' + (el.className || '') + ' ' + (el.dataset.dir || '')).toLowerCase();
       const r = el.getBoundingClientRect();
       if (!r.width) continue;
       const c = { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+      // EXACT identity first. The regex chain below is first-match/else-if over
+      // document order, and "Move up and left" matches /up|forward|north/ before
+      // it can ever reach /left|west/ - so with eight directions a diagonal
+      // would silently bind to `up`, and the two-thumb test would pass anyway
+      // because a diagonal also has z = 1. data-dir removes the whole class.
+      if (el.dataset.dir) { out[el.dataset.dir] = c; continue; }
+      const t = ((el.getAttribute('aria-label') || '') + ' ' + (el.className || '')).toLowerCase();
       if (/up|forward|north/.test(t) && !out.up) out.up = c;
       else if (/left|west/.test(t) && !out.left) out.left = c;
       else if (/jump/.test(t) && !out.jump) out.jump = c;
@@ -182,6 +188,339 @@ console.log('\n== touch input (real touch events, not the keyboard) ==');
     console.log('  FAIL  could not locate controls');
   }
   ok('touch: no console errors', errors.length === 0, errors.slice(0, 2).join(' | '));
+  await page.close();
+}
+
+// ============================================================ 2b. eight-way pad
+// The whole point of the diagonals: ONE finger, eight directions, and a slide
+// around the ring that never drops to neutral. Every assertion here drives real
+// PointerEvents at real coordinates - none of it goes through the keyboard.
+console.log('\n== eight-way pad (one finger, eight directions) ==');
+{
+  const { page, errors } = await boot(DEVICES[1]);
+  await play(page);
+  await grounded(page);
+
+  // Install the same synthetic-pointer helper the section above uses, plus a
+  // reader for touch.snapshot() - state.input cannot tell a stuck LEFT from a
+  // deliberate one, but a source id in two holder Sets is unambiguous.
+  await page.evaluate(() => {
+    window.__P__ = {
+      fire(x, y, type, id) {
+        const el = document.elementFromPoint(x, y) || document.body;
+        el.dispatchEvent(new PointerEvent(type, {
+          pointerId: id, pointerType: 'touch', isPrimary: id === 1,
+          clientX: x, clientY: y, bubbles: true, cancelable: true,
+        }));
+      },
+      // pointermove is bound on window, so it does not need the right element.
+      move(x, y, id) {
+        window.dispatchEvent(new PointerEvent('pointermove', {
+          pointerId: id, pointerType: 'touch', isPrimary: id === 1,
+          clientX: x, clientY: y, bubbles: true, cancelable: true,
+        }));
+      },
+      centres() {
+        const out = {};
+        for (const el of document.querySelectorAll('[data-dir]')) {
+          const r = el.getBoundingClientRect();
+          out[el.dataset.dir] = { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        }
+        return out;
+      },
+      input: () => ({ ...window.__EMEEM__.state.input }),
+      snap: () => window.__EMEEM__.touch.snapshot(),
+    };
+  });
+
+  const C = await page.evaluate(() => window.__P__.centres());
+  const DIRS = ['up', 'left', 'right', 'down', 'upleft', 'upright', 'downleft', 'downright'];
+  const WANT = {
+    up: [0, 1], down: [0, -1], left: [-1, 0], right: [1, 0],
+    upleft: [-1, 1], upright: [1, 1], downleft: [-1, -1], downright: [1, -1],
+  };
+  ok('all eight directions exist in the DOM',
+    DIRS.every((d) => C[d]), `found ${Object.keys(C).length}: ${Object.keys(C).join(',')}`);
+
+  if (DIRS.every((d) => C[d])) {
+    // 1. every direction from ONE synthetic finger, and a clean release
+    const bad = [];
+    for (const d of DIRS) {
+      const r = await page.evaluate(({ p, id }) => {
+        window.__P__.fire(p.x, p.y, 'pointerdown', id);
+        const held = window.__P__.input();
+        window.__P__.fire(p.x, p.y, 'pointerup', id);
+        return { held, freed: window.__P__.input() };
+      }, { p: C[d], id: 9 });
+      const [wx, wz] = WANT[d];
+      if (r.held.x !== wx || r.held.z !== wz) bad.push(`${d} gave ${r.held.x},${r.held.z} want ${wx},${wz}`);
+      if (r.freed.x !== 0 || r.freed.z !== 0) bad.push(`${d} did not release (${r.freed.x},${r.freed.z})`);
+    }
+    ok('one finger produces all eight directions', bad.length === 0, bad.slice(0, 3).join(' | ') || '8/8');
+
+    // 2. INVARIANT A: eight fingers, no source id in two holder Sets
+    const inv = await page.evaluate((C) => {
+      const D = Object.keys(C);
+      D.forEach((d, i) => window.__P__.fire(C[d].x, C[d].y, 'pointerdown', 11 + i));
+      const snap = window.__P__.snap();
+      const owner = new Map(); const dup = [];
+      for (const [act, srcs] of Object.entries(snap.holders)) {
+        for (const src of srcs) { if (owner.has(src)) dup.push(`${src} in ${owner.get(src)} and ${act}`); owner.set(src, act); }
+      }
+      const inp = { ...window.__EMEEM__.state.input };
+      D.forEach((d, i) => window.__P__.fire(C[d].x, C[d].y, 'pointerup', 11 + i));
+      const after = window.__P__.snap();
+      const leftOver = Object.entries(after.holders).filter(([, v]) => v.length).map(([k]) => k);
+      return { dup, inp, leftOver };
+    }, C);
+    ok('invariant A: no source id held by two directions', inv.dup.length === 0, inv.dup.slice(0, 2).join(' | ') || 'clean');
+    ok('eight simultaneous holds stay in range',
+      [-1, 0, 1].includes(inv.inp.x) && [-1, 0, 1].includes(inv.inp.z), `x=${inv.inp.x} z=${inv.inp.z}`);
+    ok('all eight release leaves nothing held', inv.leftOver.length === 0, inv.leftOver.join(',') || 'empty');
+
+    // 3. stacked overlapping holds must not sum (left + upleft would read x=-2,
+    //    and player.js NORMALISES rather than clamps, so it would bend the
+    //    movement angle from -45 to -63 degrees instead of failing loudly)
+    const stack = await page.evaluate((C) => {
+      window.__P__.fire(C.left.x, C.left.y, 'pointerdown', 31);
+      window.__P__.fire(C.upleft.x, C.upleft.y, 'pointerdown', 32);
+      window.__P__.fire(C.downleft.x, C.downleft.y, 'pointerdown', 33);
+      const inp = { ...window.__EMEEM__.state.input };
+      [31, 32, 33].forEach((id, i) => {
+        const p = [C.left, C.upleft, C.downleft][i];
+        window.__P__.fire(p.x, p.y, 'pointerup', id);
+      });
+      return inp;
+    }, C);
+    ok('overlapping holds do not sum',
+      [-1, 0, 1].includes(stack.x) && [-1, 0, 1].includes(stack.z), `x=${stack.x} z=${stack.z}`);
+
+    // 4. slide hand-over: up -> upleft -> up -> off the pad -> back on
+    const slide = await page.evaluate((C) => {
+      const seq = [];
+      window.__P__.fire(C.up.x, C.up.y, 'pointerdown', 41);
+      seq.push(window.__P__.input());
+      window.__P__.move(C.upleft.x, C.upleft.y, 41); seq.push(window.__P__.input());
+      window.__P__.move(C.up.x, C.up.y, 41);         seq.push(window.__P__.input());
+      window.__P__.move(window.innerWidth * 0.7, window.innerHeight * 0.4, 41);
+      seq.push(window.__P__.input());
+      const stillTracked = window.__P__.snap().pointers.some(([id, act]) => id === 41 && act === null);
+      window.__P__.move(C.up.x, C.up.y, 41);         seq.push(window.__P__.input());
+      window.__P__.fire(C.up.x, C.up.y, 'pointerup', 41);
+      return { seq, stillTracked, end: window.__P__.input() };
+    }, C);
+    const S = slide.seq;
+    ok('slide up -> up-left hands over',
+      S[0].z === 1 && S[0].x === 0 && S[1].x === -1 && S[1].z === 1,
+      `${S[0].x},${S[0].z} -> ${S[1].x},${S[1].z}`);
+    ok('slide back to up hands back', S[2].x === 0 && S[2].z === 1, `${S[2].x},${S[2].z}`);
+    ok('sliding off the pad releases but keeps tracking',
+      S[3].x === 0 && S[3].z === 0 && slide.stillTracked, `input ${S[3].x},${S[3].z} tracked=${slide.stillTracked}`);
+    ok('sliding back on re-engages with no new touch', S[4].z === 1, `${S[4].x},${S[4].z}`);
+    ok('slide sequence ends neutral', slide.end.x === 0 && slide.end.z === 0, `${slide.end.x},${slide.end.z}`);
+
+    // 5. the headline: sweep the whole ring without ever dropping to neutral
+    const ring = await page.evaluate((C) => {
+      const order = ['up', 'upright', 'right', 'downright', 'down', 'downleft', 'left', 'upleft', 'up'];
+      window.__P__.fire(C.up.x, C.up.y, 'pointerdown', 51);
+      let neutral = 0; const seen = new Set();
+      for (let i = 0; i < order.length - 1; i++) {
+        const a = C[order[i]], b = C[order[i + 1]];
+        const steps = Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / 3);
+        for (let t = 1; t <= steps; t++) {
+          window.__P__.move(a.x + (b.x - a.x) * t / steps, a.y + (b.y - a.y) * t / steps, 51);
+          const s = window.__P__.snap().pointers.find(([id]) => id === 51);
+          if (s && s[1]) seen.add(s[1]);
+          const inp = window.__EMEEM__.state.input;
+          if (inp.x === 0 && inp.z === 0) neutral++;
+        }
+      }
+      window.__P__.fire(C.up.x, C.up.y, 'pointerup', 51);
+      return { neutral, seen: [...seen] };
+    }, C);
+    ok('a slide around the ring never drops to neutral', ring.neutral === 0, `${ring.neutral} neutral frames`);
+    ok('a slide around the ring visits all eight', ring.seen.length === 8, `${ring.seen.length}/8: ${ring.seen.join(',')}`);
+
+    // 6. a stationary thumb on a seam must not chatter
+    const chatter = await page.evaluate((C) => {
+      const seamX = (C.up.x + C.upleft.x) / 2, seamY = C.up.y;
+      window.__P__.fire(seamX, seamY, 'pointerdown', 61);
+      let prev = null, flips = 0;
+      let seed = 7;
+      const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
+      for (let i = 0; i < 200; i++) {
+        window.__P__.move(seamX + (rnd() - 0.5) * 2, seamY + (rnd() - 0.5) * 2, 61);
+        const s = window.__P__.snap().pointers.find(([id]) => id === 61);
+        const act = s ? s[1] : null;
+        if (prev !== null && act !== prev) flips++;
+        prev = act;
+      }
+      window.__P__.fire(seamX, seamY, 'pointerup', 61);
+      return flips;
+    }, C);
+    ok('a stationary thumb on a seam does not chatter', chatter <= 2, `${chatter} direction changes in 200 moves`);
+
+    // 7. THE discriminating test for the half-released-composite bug class:
+    //    a reused pointerId jumping straight from one diagonal to its opposite.
+    //    A composite implementation reads exactly 0,0 here.
+    const reuse = await page.evaluate((C) => {
+      window.__P__.fire(C.upleft.x, C.upleft.y, 'pointerdown', 1);
+      window.__P__.fire(C.downright.x, C.downright.y, 'pointerdown', 1);  // no pointerup
+      const inp = window.__P__.input();
+      window.__P__.fire(C.downright.x, C.downright.y, 'pointerup', 1);
+      return { inp, after: window.__P__.input() };
+    }, C);
+    ok('a reused pointerId across opposite diagonals is clean',
+      reuse.inp.x === 1 && reuse.inp.z === -1, `x=${reuse.inp.x} z=${reuse.inp.z} (a half-released composite reads 0,0)`);
+    ok('reused pointerId releases fully', reuse.after.x === 0 && reuse.after.z === 0, `${reuse.after.x},${reuse.after.z}`);
+
+    // 8. a press in the dead centre tracks but holds nothing, then engages
+    const hub = await page.evaluate((C) => {
+      const cx = (C.left.x + C.right.x) / 2, cy = (C.up.y + C.down.y) / 2;
+      window.__P__.fire(cx, cy, 'pointerdown', 71);
+      const snap = window.__P__.snap();
+      const held = Object.values(snap.holders).some((v) => v.length);
+      const tracked = snap.pointers.some(([id, act]) => id === 71 && act === null);
+      const inp = window.__P__.input();
+      window.__P__.move(C.up.x, C.up.y, 71);
+      const after = window.__P__.input();
+      window.__P__.fire(C.up.x, C.up.y, 'pointerup', 71);
+      return { held, tracked, inp, after };
+    }, C);
+    ok('a press in the dead centre holds nothing', !hub.held && hub.inp.x === 0 && hub.inp.z === 0, `held=${hub.held}`);
+    ok('a press in the dead centre is still tracked', hub.tracked, `tracked=${hub.tracked}`);
+    ok('sliding out of the dead centre engages', hub.after.z === 1, `${hub.after.x},${hub.after.z}`);
+
+    // 9. interruption with a diagonal held - the existing nightmare sequence
+    const inter = await page.evaluate((C) => {
+      window.__P__.fire(C.downright.x, C.downright.y, 'pointerdown', 81);
+      window.__P__.fire(C.downright.x, C.downright.y, 'pointercancel', 81);
+      window.dispatchEvent(new Event('blur'));
+      const snap = window.__P__.snap();
+      return {
+        inp: { ...window.__EMEEM__.state.input },
+        leftOver: Object.entries(snap.holders).filter(([, v]) => v.length).map(([k]) => k),
+      };
+    }, C);
+    ok('an interrupted diagonal leaves nothing stuck',
+      inter.inp.x === 0 && inter.inp.z === 0 && inter.leftOver.length === 0,
+      `x=${inter.inp.x} z=${inter.inp.z} held=[${inter.leftOver}]`);
+
+    // 10. the layout breakpoint crossed while a diagonal is held
+    await page.evaluate((C) => window.__P__.fire(C.upleft.x, C.upleft.y, 'pointerdown', 91), C);
+    await page.setViewportSize({ width: 932, height: 380 });   // crosses max-height:400px
+    await page.waitForTimeout(120);
+    const bp = await page.evaluate(() => {
+      const inp = { ...window.__EMEEM__.state.input };
+      window.__P__.fire(10, 10, 'pointerup', 91);
+      window.dispatchEvent(new Event('blur'));
+      return { inp, after: { ...window.__EMEEM__.state.input } };
+    });
+    ok('a held diagonal survives the layout breakpoint',
+      bp.inp.x === -1 && bp.inp.z === 1, `x=${bp.inp.x} z=${bp.inp.z}`);
+    ok('and still releases afterwards', bp.after.x === 0 && bp.after.z === 0, `${bp.after.x},${bp.after.z}`);
+    await page.setViewportSize({ width: 932, height: 430 });
+
+    // 11. pressed feedback must survive the cascade. `.emtc-diag`'s quiet fill
+    //     sits LATER in the stylesheet than `.emtc-down` at equal specificity,
+    //     so unguarded it wins while the button is held: the chip stays dark
+    //     while the glyph still inverts to near-black, and the arrow VANISHES
+    //     under the thumb. Compare a diagonal against a cardinal, which is
+    //     known good, rather than against a hard-coded colour.
+    //
+    //     THE WAITS ARE LOAD-BEARING. `.emtc-btn` transitions background-color
+    //     and transform over 70ms, and getComputedStyle mid-transition returns
+    //     the INTERPOLATED value - read immediately after pointerdown it hands
+    //     back the REST colour for every button, and the assertion passes on a
+    //     broken build because both sides are equally wrong. Everything below
+    //     waits past the transition before reading.
+    // Waiting out the transition does not work here: under software
+    // rasterisation the page runs at ~5fps, so 180ms is about ONE frame and
+    // background-color/transform are still at their start values. Finish the
+    // transitions explicitly instead - deterministic, and independent of how
+    // slowly the headless compositor happens to be ticking.
+    const readStyle = (d) => page.evaluate((d) => {
+      const el = document.querySelector(`[data-dir=${d}]`);
+      if (el.getAnimations) for (const a of el.getAnimations()) { try { a.finish(); } catch { /* not finishable */ } }
+      const cs = getComputedStyle(el);
+      return {
+        bg: cs.backgroundColor,
+        fill: getComputedStyle(el.querySelector('svg')).fill,
+        down: el.className.includes('emtc-down'),
+        rect: +el.getBoundingClientRect().width.toFixed(2),
+        layout: el.offsetWidth,
+      };
+    }, d);
+    const holdRead = async (d) => {
+      await page.evaluate(({ p }) => window.__P__.fire(p.x, p.y, 'pointerdown', 101), { p: C[d] });
+      const st = await readStyle(d);
+      await page.evaluate(({ p }) => { window.__P__.fire(p.x, p.y, 'pointerup', 101); window.dispatchEvent(new Event('blur')); }, { p: C[d] });
+      return st;
+    };
+    const upRest = await readStyle('up');
+    const ulRest = await readStyle('upleft');
+    const upDown = await holdRead('up');
+    const ulDown = await holdRead('upleft');
+    ok('the press-feedback test is not vacuous',
+      upDown.down && upDown.bg !== upRest.bg,
+      `cardinal rest ${upRest.bg} -> down ${upDown.bg}`);
+    ok('pressing a diagonal changes its chip too',
+      ulDown.bg !== ulRest.bg, `rest ${ulRest.bg} -> down ${ulDown.bg}`);
+    ok('a pressed diagonal looks like a pressed cardinal',
+      ulDown.bg === upDown.bg && ulDown.fill === upDown.fill,
+      `diag ${ulDown.bg}/${ulDown.fill} vs cardinal ${upDown.bg}/${upDown.fill}`);
+
+    // 12. a re-measure taken WHILE a button is held must not cache its pressed
+    //     transform:scale(.93). If it does, the zone is 2.66px tight on every
+    //     side and stays that way (toggling the pressed class does not raise
+    //     zonesDirty), so the outer edge of that collar goes dead to
+    //     pointermove and the direction drops with the thumb still on it.
+    // The baseline MUST be the button at rest. Test 11 released a button 
+    // moments ago and its transform is still transitioning BACK over 70ms, so
+    // a naive read here returns a top a pixel or so low - which moves the probe
+    // out of the 2.66px dead band and makes this whole test pass on broken
+    // code. Finish every animation first, then assert the read really is the
+    // resting geometry before using it.
+    const geo = await page.evaluate(() => {
+      const el = document.querySelector('[data-dir=up]');
+      if (el.getAnimations) for (const a of el.getAnimations()) { try { a.finish(); } catch { /* not finishable */ } }
+      const r = el.getBoundingClientRect();
+      return { cx: r.x + r.width / 2, top: r.top, w: +r.width.toFixed(2), layout: el.offsetWidth };
+    });
+    ok('the shrink test baseline is the button at rest',
+      Math.abs(geo.w - geo.layout) < 0.01, `rect ${geo.w}px vs layout ${geo.layout}px`);
+    const edgeY = geo.top - 12.5;              // inside the 14px collar, above the button
+    await page.evaluate(({ x, y }) => window.__P__.fire(x, y, 'pointerdown', 111), { x: geo.cx, y: edgeY });
+    const held = await readStyle('up');        // finishes the transform transition
+
+    const shrink = await page.evaluate(({ x, y }) => {
+      const before = { ...window.__EMEEM__.state.input };
+      window.dispatchEvent(new Event('resize'));   // zonesDirty = true
+      window.__P__.move(x + 0.5, y, 111);          // forces measure() while still held
+      const after = { ...window.__EMEEM__.state.input };
+      window.__P__.fire(x, y, 'pointerup', 111);
+      window.dispatchEvent(new Event('blur'));
+      return { before, after };
+    }, { x: geo.cx, y: edgeY });
+    ok('the shrink test is not vacuous -- the press transform really applied',
+      held.down && held.rect < held.layout,
+      `pressed rect ${held.rect}px vs layout ${held.layout}px`);
+    ok('a press on the outer collar is grabbed', shrink.before.z === 1, `z=${shrink.before.z}`);
+    ok('re-measuring while held does not shrink the hit zone',
+      shrink.after.z === 1, `z=${shrink.after.z} after a re-measure with the button scaled`);
+
+    // 13. destroy() with a diagonal held
+    const destroyed = await page.evaluate((C) => {
+      window.__P__.fire(C.upright.x, C.upright.y, 'pointerdown', 95);
+      window.__EMEEM__.touch.destroy();
+      return { ...window.__EMEEM__.state.input };
+    }, C);
+    ok('destroy() with a diagonal held leaves nothing stuck',
+      destroyed.x === 0 && destroyed.z === 0 && destroyed.jump === false,
+      `x=${destroyed.x} z=${destroyed.z} jump=${destroyed.jump}`);
+  }
+
+  ok('eight-way pad: no console errors', errors.length === 0, errors.slice(0, 2).join(' | '));
   await page.close();
 }
 
