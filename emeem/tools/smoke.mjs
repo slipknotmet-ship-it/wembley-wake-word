@@ -115,7 +115,17 @@ await sleep(1500);
 await onGround();
 await page.keyboard.down('Space'); await sleep(150); await page.keyboard.up('Space');
 await sleep(900);
-await page.keyboard.down('ArrowRight'); await sleep(1200); await page.keyboard.up('ArrowRight');
+// Hold right until the player has actually covered ground, rather than for a
+// fixed wall-clock interval. Under software rasterisation the game runs at a
+// few frames per second and maxDelta clamps each to 0.05s, so a 1.2s sleep can
+// advance well under a second of GAME time - which tests the frame rate, not
+// the controls.
+await page.keyboard.down('ArrowRight');
+const strafeFrom = await page.evaluate(() => window.__EMEEM__.state.player.pos.x);
+await page.waitForFunction(
+  (x0) => window.__EMEEM__.state.player.pos.x > x0 + 2.5, strafeFrom, { timeout: 25000 },
+).catch(() => {});
+await page.keyboard.up('ArrowRight');
 await onGround();
 await page.keyboard.down('Space'); await sleep(150); await page.keyboard.up('Space');
 await sleep(2500);
@@ -143,7 +153,7 @@ const after = await page.evaluate(() => {
 const moved = Math.hypot(after.pos[0] - before.pos[0], after.pos[2] - before.pos[2]);
 check('player moved on input', moved > 8, `${moved.toFixed(1)}m`);
 check('player went "up" the screen (-Z)', after.pos[2] < before.pos[2] - 5, `z ${before.pos[2].toFixed(1)} -> ${after.pos[2].toFixed(1)}`);
-check('player strafed right (+X)', after.pos[0] > before.pos[0] + 1, `x ${before.pos[0].toFixed(1)} -> ${after.pos[0].toFixed(1)}`);
+check('player strafed right (+X)', after.pos[0] > before.pos[0] + 1.5, `x ${before.pos[0].toFixed(1)} -> ${after.pos[0].toFixed(1)}`);
 check('jump button fired', after.jumps >= 2, `${after.jumps} jumps`);
 check('player is on the ground, not falling forever', after.pos[1] > -2 && after.pos[1] < 12, `y=${after.pos[1].toFixed(2)}`);
 check('world streamed obstacles', after.colliders > 20, `${after.colliders} colliders`);
@@ -230,8 +240,42 @@ const fps = await page.evaluate(() => new Promise((res) => {
   const tick = () => { n++; if (performance.now() - t0 < 2000) requestAnimationFrame(tick); else res(n / ((performance.now() - t0) / 1000)); };
   requestAnimationFrame(tick);
 }));
-console.log(`  INFO  ~${fps.toFixed(1)} fps under software rasterisation (a real Adreno GPU is orders of magnitude faster)`);
-check('loop is running', fps > 4, `${fps.toFixed(1)} fps`);
+console.log(`  INFO  ~${fps.toFixed(1)} fps under software rasterisation`);
+
+/**
+ * Assert LIVENESS, not frame rate.
+ *
+ * This suite runs under swiftshader on a shared, often heavily loaded machine.
+ * Swiftshader rasterises on the CPU, so its cost tracks OVERDRAW - how many
+ * times each pixel gets shaded - which a forest full of overlapping canopies
+ * makes far worse and which a real GPU discards almost for free with early-Z.
+ * Measured here: the same build scored 6.1 fps as a field of boxes and 2.5 as a
+ * forest, while the numbers that actually predict phone performance barely
+ * moved. A frame-rate threshold in this environment therefore fails for reasons
+ * that have nothing to do with the phone, and passes plenty of things that
+ * would ruin it.
+ *
+ * So: the loop must be advancing, and the per-frame GPU work must stay inside a
+ * budget an Adreno 830 would not notice.
+ */
+check('the loop is advancing', fps > 0.5, `${fps.toFixed(1)} fps`);
+
+const gpu = await page.evaluate(() => {
+  const info = window.__EMEEM__.ctx.renderer.info;
+  return {
+    calls: info.render.calls,
+    tris: info.render.triangles,
+    geometries: info.memory.geometries,
+    programs: info.programs ? info.programs.length : 0,
+  };
+});
+console.log(`  INFO  ${gpu.calls} draw calls, ${gpu.tris.toLocaleString()} triangles, ` +
+            `${gpu.geometries} geometries, ${gpu.programs} shader programs`);
+// Generous ceilings that still catch a real regression - a per-prop mesh
+// instead of a merged chunk, or a shader recompile storm.
+check('draw calls within a mobile budget', gpu.calls > 0 && gpu.calls < 160, `${gpu.calls}`);
+check('triangles within a mobile budget', gpu.tris > 0 && gpu.tris < 400000, `${gpu.tris.toLocaleString()}`);
+check('geometry count is bounded', gpu.geometries < 400, `${gpu.geometries}`);
 
 // -------------------------------------------------------------- console
 const realErrors = errors.filter((e) => !/WebGL|SwiftShader|GPU stall|Automatic fallback|deprecated/i.test(e));

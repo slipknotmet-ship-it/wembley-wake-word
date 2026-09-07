@@ -770,6 +770,25 @@ export function createEmeems(ctx) {
     return world.queryAABB(_min, _max, _hits).length > 0;
   }
 
+  /**
+   * True if a runner heading in `ang` would hit something within `reach`.
+   *
+   * TWO samples, not one. A single box centred at the reach point spans roughly
+   * 0.95m to 2.35m ahead at flee speed and leaves the first metre unexamined,
+   * so a prop entering that near band as the runner turned was never seen at
+   * all. The mid-point sample closes the gap, and two point tests stay far
+   * tighter than one union box would be - a swept AABB down a diagonal path
+   * covers a wedge of empty ground either side and would have runners shying
+   * away from trees they were never going to touch.
+   */
+  function pathBlocked(world, x, z, ang, reach, kind) {
+    if (!world) return false;
+    const sx = Math.sin(ang);
+    const sz = Math.cos(ang);
+    if (blockedAt(world, x + sx * reach, z + sz * reach, kind)) return true;
+    return blockedAt(world, x + sx * reach * 0.45, z + sz * reach * 0.45, kind);
+  }
+
   /** True if (x, z) falls inside the keep-out circle of any live amaam. */
   function nearAmaam(x, z, kind) {
     const r = amaamKeepOut(kind);
@@ -936,25 +955,35 @@ export function createEmeems(ctx) {
     const bp = e.basePos;
     e.avoidT = 0;
 
-    // Hazards first: a runner sitting on an amaam is a prize you cannot take.
-    for (let i = 0; i < amaamList.length; i++) {
-      const b = amaamList[i].basePos;
-      const dx = bp.x - b.x;
-      const dz = bp.z - b.z;
-      const d2 = dx * dx + dz * dz;
-      if (d2 < AMAAM_AVOID_R2 && d2 > 1e-6) {
-        e.avoidAng = Math.atan2(dx, dz); // straight away from it
-        e.avoidT = AVOID_HOLD;
-        return;
-      }
-    }
-
-    if (!world) return;
-
+    // PROPS FIRST, ALWAYS. A prop is geometry the runner cannot pass through;
+    // an amaam is only somewhere it would rather not sit. Checking the hazard
+    // first and returning on it - which is what this did originally - meant a
+    // runner near an amaam never looked at the tree it was about to bolt into,
+    // and 1.2% of sampled fleeing runners were found inside a trunk's footprint.
     const reach = PROBE_AHEAD + k.speed * 0.12;
-    const ax = bp.x + Math.sin(want) * reach;
-    const az = bp.z + Math.cos(want) * reach;
-    if (!blockedAt(world, ax, az, k)) return;
+    const blocked = pathBlocked(world, bp.x, bp.z, want, reach, k);
+
+    if (!blocked) {
+      // The way ahead is clear, so the hazard gets its say: a runner parked on
+      // an amaam is a prize you cannot take without paying for it.
+      for (let i = 0; i < amaamList.length; i++) {
+        const b = amaamList[i].basePos;
+        const dx = bp.x - b.x;
+        const dz = bp.z - b.z;
+        const d2 = dx * dx + dz * dz;
+        if (d2 < AMAAM_AVOID_R2 && d2 > 1e-6) {
+          const away = Math.atan2(dx, dz); // straight away from it
+          // ...but never into a prop. If the escape is blocked, stay put and
+          // let the next probe find a way out.
+          if (!pathBlocked(world, bp.x, bp.z, away, reach, k)) {
+            e.avoidAng = away;
+            e.avoidT = AVOID_HOLD;
+          }
+          return;
+        }
+      }
+      return;
+    }
 
     // Blocked. Prefer the side that also keeps it away from the player, so a
     // cornered runner breaks past you rather than into you - that is the moment
@@ -965,16 +994,14 @@ export function createEmeems(ctx) {
     const a1 = Math.abs(first) >= Math.abs(second) ? want + PROBE_TURN : want - PROBE_TURN;
     const a2 = a1 === want + PROBE_TURN ? want - PROBE_TURN : want + PROBE_TURN;
 
-    const x1 = bp.x + Math.sin(a1) * reach;
-    const z1 = bp.z + Math.cos(a1) * reach;
-    if (!blockedAt(world, x1, z1, k)) {
+    if (!pathBlocked(world, bp.x, bp.z, a1, reach, k)) {
       e.avoidAng = a1;
       e.avoidT = AVOID_HOLD;
       return;
     }
-    const x2 = bp.x + Math.sin(a2) * reach;
-    const z2 = bp.z + Math.cos(a2) * reach;
-    e.avoidAng = blockedAt(world, x2, z2, k) ? want + Math.PI : a2;
+    // Both flanks shut: turn round. Cornered against a trunk with the player
+    // closing is exactly the situation the runner is supposed to lose.
+    e.avoidAng = pathBlocked(world, bp.x, bp.z, a2, reach, k) ? want + Math.PI : a2;
     e.avoidT = AVOID_HOLD;
   }
 
@@ -1006,18 +1033,26 @@ export function createEmeems(ctx) {
       e.probe = alarmed ? PROBE_FLEE : PROBE_CALM;
       probeSteer(e, k, want, world, px, pz);
     }
+    let swerving = false;
     if (e.avoidT > 0) {
       e.avoidT -= dt;
       want = e.avoidAng;
+      swerving = true;
     }
 
-    // 3. The tether always gets the last word, so it can never leave the field.
+    // 3. The tether gets the last word, so it can never leave the field - but
+    //    only ever most of it. At full authority a runner far from home and
+    //    pressed against a trunk would be steered straight back into the trunk
+    //    it had just decided to go around, and "does not run through props" has
+    //    to hold even in the corner case. Capped like this the swerve wins the
+    //    half second it lasts and the tether wins everything after it.
     const hx = e.homeX - bp.x;
     const hz = e.homeZ - bp.z;
     const hd2 = hx * hx + hz * hz;
     if (hd2 > TETHER_R * TETHER_R) {
       const hd = Math.sqrt(hd2);
-      const w = Math.min(1, (hd - TETHER_R) / TETHER_SPAN);
+      let w = Math.min(1, (hd - TETHER_R) / TETHER_SPAN);
+      if (swerving && w > 0.35) w = 0.35;
       want += wrapPi(Math.atan2(hx, hz) - want) * w;
     }
 

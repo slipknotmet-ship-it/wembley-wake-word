@@ -435,27 +435,30 @@ export function createWorld(ctx) {
    * above the player's feet, so keeping every leaf above that means a tree can
    * shade you but can never swallow the camera - the one thing a forest can do
    * to a fixed-heading chase cam that would be unforgivable. The 15cm on top is
-   * margin: a leaning trunk gives up a couple of centimetres of height to its
-   * own tilt, and this absorbs that rather than the camera doing so.
+   * headroom the geometry is not allowed to spend.
    */
   const CANOPY_FLOOR = CONFIG.camera.height + 0.15;
 
   const TREE_H_MIN = W.obstacleMaxHeight * 0.77;
   const TREE_H_MAX = W.obstacleMaxHeight;
-  const CROWN_R_MIN = HALF_MAX * 0.5;
   const CROWN_R_MAX = HALF_MAX;
-  const TREE_LEAN_MAX = 0.13; // radians. Enough to break the warehouse look.
+  const CROWN_R_MIN = HALF_MAX * 0.38;
+  const TREE_LEAN_MAX = 0.18; // radians, ~10 degrees. Breaks the warehouse look.
+  /** Height a leaning trunk gives up to its own tilt, at the worst case. */
+  const LEAN_LOSS = TREE_H_MAX * (1 - Math.cos(TREE_LEAN_MAX));
   /** How far below the trunk top the lowest leaf may reach, as a fraction of crown height. */
   const CANOPY_DROP = 0.2;
   /** Shortest crown worth drawing. Below this a tree reads as a fence post. */
   const MIN_CROWN_H = 1.0;
+  /** Trunk height the canopy floor demands of a tree of total height h. */
+  const minTrunkFor = (h) => (CANOPY_FLOOR + LEAN_LOSS + CANOPY_DROP * h) / (1 + CANOPY_DROP);
   /**
    * Shortest a tree can be and still hold a real crown above CANOPY_FLOOR.
-   * Solving trunkH >= (floor + drop*h) / (1 + drop) against trunkH <= h - crown
-   * gives exactly this, so no config edit can produce a tree whose canopy has
-   * to be squashed into nothing to stay above the camera.
+   * Solving minTrunkFor(h) <= h - MIN_CROWN_H gives exactly this, so no config
+   * edit can produce a tree whose canopy has to be squashed into nothing to
+   * stay above the camera.
    */
-  const MIN_TREE_H = CANOPY_FLOOR + MIN_CROWN_H * (1 + CANOPY_DROP);
+  const MIN_TREE_H = CANOPY_FLOOR + LEAN_LOSS + MIN_CROWN_H * (1 + CANOPY_DROP);
 
   /**
    * Tall enough to jump onto and no taller. Tie it to the actual jump so a
@@ -667,13 +670,15 @@ export function createWorld(ctx) {
    */
   function placeTree(rng, originX, originZ, bucket) {
     const h = Math.max(range(rng, TREE_H_MIN, TREE_H_MAX), MIN_TREE_H);
-    const trunkFrac = range(rng, 0.62, 0.74);
+    const trunkFrac = range(rng, 0.6, 0.73);
     // Keep the lowest leaf above the chase camera: with the canopy reaching
     // CANOPY_DROP * crownH below the trunk top, that solves to this floor.
-    const minTrunk = (CANOPY_FLOOR + CANOPY_DROP * h) / (1 + CANOPY_DROP);
-    const trunkH = clamp(h * trunkFrac, minTrunk, h - MIN_CROWN_H);
+    const trunkH = clamp(h * trunkFrac, minTrunkFor(h), h - MIN_CROWN_H);
     const crownH = h - trunkH;
-    const crownR = range(rng, CROWN_R_MIN, CROWN_R_MAX);
+    // Crown WIDTH follows crown HEIGHT. Rolling the two independently gave
+    // short trees a full-width canopy, which reads as a parasol on a pole
+    // rather than as a tree.
+    const crownR = clamp(crownH * range(rng, 0.78, 1.18), CROWN_R_MIN, CROWN_R_MAX);
     const trunkR = range(rng, 0.15, 0.2) + crownR * range(rng, 0.05, 0.09);
     const lean = range(rng, 0, TREE_LEAN_MAX);
     const leanDir = rng() * TAU;
@@ -834,8 +839,10 @@ export function createWorld(ctx) {
    */
   function placeBush(rng, originX, originZ) {
     const radius = range(rng, BUSH_R_MIN, BUSH_R_MAX);
-    const h = clamp(range(rng, radius * 0.6, radius * 1.35), BUSH_H_MIN, BUSH_H_MAX);
-    const lobes = rng() < 0.55 ? 3 : 2;
+    // Wider than it is tall, always. A bush as tall as it is wide is a shrub
+    // sculpture; undergrowth spreads.
+    const h = clamp(range(rng, radius * 0.5, radius * 0.92), BUSH_H_MIN, BUSH_H_MAX);
+    const lobes = 3 + (rng() < 0.45 ? 1 : 0);
 
     // Soft clutter nestles: half spacing, so bushes gather under canopies and
     // against boulders the way undergrowth actually does.
@@ -844,20 +851,25 @@ export function createWorld(ctx) {
     const pz = spotZ;
     addFoot(px, pz, radius * 0.5);
 
-    const ft = range(rng, 0.74, 1.06);
-    const fr = ft * range(rng, 0.88, 1.08);
+    // Undergrowth sits in the shade of everything above it, so it runs darker
+    // and duller than a canopy - which also stops a knee-high shrub competing
+    // with an emeem for the eye.
+    const ft = range(rng, 0.62, 0.9);
+    const fr = ft * range(rng, 0.86, 1.06);
     const fg = ft * range(rng, 0.94, 1.06);
-    const fb = ft * range(rng, 0.78, 1.0);
+    const fb = ft * range(rng, 0.76, 0.98);
 
     for (let b = 0; b < lobes; b++) {
-      const lr = radius * range(rng, 0.46, 0.8);
-      const lh = h * range(rng, 0.62, 1.0);
+      // Fat, overlapping lobes kept well inside the footprint: separate lobes
+      // read as a handful of pebbles, overlapping ones as one clump of leaves.
+      const lr = radius * range(rng, 0.58, 0.92);
+      const lh = h * range(rng, 0.66, 1.0);
       const ang = rng() * TAU;
-      const dist = (radius - lr) * range(rng, 0.0, 0.95);
+      const dist = Math.max(0, radius - lr) * range(rng, 0.25, 1.0);
       const vi = pick(rng, FOLIAGE_BLOBS.count);
       composeSeated(
         FOLIAGE_BLOBS, vi,
-        lr, range(rng, 0.7, 1.0), lh, 0.45, rng() * TAU,
+        lr, range(rng, 0.66, 1.0), lh, 0.5, rng() * TAU,
         px + Math.cos(ang) * dist, pz + Math.sin(ang) * dist, W.groundY,
       );
       const g = FOLIAGE_BLOBS.geoms[vi].clone();

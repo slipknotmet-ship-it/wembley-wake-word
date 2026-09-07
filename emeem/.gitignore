@@ -12,4 +12,8 @@ android/.gradle/
 android/build/
 android/app/build/
 android/local.properties
+
+# Build output an agent produced for an A/B comparison; it was swept into a
+# commit by a broad `git add` and does not belong in the tree.
+dist-baseline/
 .DS_Store
