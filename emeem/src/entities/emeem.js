@@ -1045,7 +1045,7 @@ export function createEmeems(ctx) {
     //    pressed against a trunk would be steered straight back into the trunk
     //    it had just decided to go around, and "does not run through props" has
     //    to hold even in the corner case. Capped like this the swerve wins the
-    //    half second it lasts and the tether wins everything after it.
+    //    AVOID_HOLD (0.32s) it lasts and the tether wins everything after it.
     const hx = e.homeX - bp.x;
     const hz = e.homeZ - bp.z;
     const hd2 = hx * hx + hz * hz;
@@ -1200,7 +1200,20 @@ export function createEmeems(ctx) {
       const rel = bp.y - py;
       const reachable = rel > k.pickYMin && rel < k.pickYMax;
 
-      if (k.magnetic && reachable && d2 < MAGNET_R2) {
+      // `simulate` gates BOTH the magnet and the pickup below. main.js keeps
+      // calling update() after a death purely so the pop and the burst finish
+      // playing - that is not a licence to keep scoring. Without the gate a
+      // prize sitting between pickR (1.25m) and magnetR (2.4m) at the instant
+      // you were caught is quietly vacuumed into the dead hand over the next
+      // few frames and taken: AFTER hud.showGameOver() captured the run total
+      // and AFTER main.js wrote state.best to localStorage. The card then
+      // disagrees with the live HUD counter still ticking behind it, the point
+      // is lost from `best`, stats.emeems overcounts the run, and a tier
+      // crossed on that phantom point fires a levelup banner and a camera
+      // shake across the game-over scrim. The nearest-prize publish below is
+      // deliberately left ungated, so the hand keeps reaching for whatever it
+      // died next to instead of relaxing the moment you are caught.
+      if (simulate && k.magnetic && reachable && d2 < MAGNET_R2) {
         const d = Math.sqrt(d2);
         // Pull toward the PINCER, not the player origin: a prize drawn to the
         // body centre ends up hovering over the palm, which looks like it is
@@ -1226,7 +1239,9 @@ export function createEmeems(ctx) {
       if (k.prize && reachable && d2 < nearD2) { nearD2 = d2; nearE = e; }
 
       // --- caught it (or walked into it) ------------------------------------
-      if (reachable && d2 < k.pickR2) {
+      // Gated on `simulate` for the reason spelled out at the magnet above: the
+      // run is over, so nothing may still be scored, shaken or tiered up.
+      if (simulate && reachable && d2 < k.pickR2) {
         // Commit this frame's motion first: collect() reads the mesh position
         // for the burst and for the 'collect' payload, and a stale one would
         // put the flash a frame behind the thing you just touched.

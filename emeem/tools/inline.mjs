@@ -13,7 +13,12 @@ import { join } from 'node:path';
 
 const DIST = 'dist';
 const artifactMode = process.argv.includes('--artifact');
-const out = process.argv[process.argv.indexOf('--out') + 1] || (artifactMode ? 'dist/emeem-artifact.html' : 'dist/emeem-standalone.html');
+// indexOf returns -1 when --out is absent, and argv[-1 + 1] is argv[0] - the
+// node binary itself, which is truthy, so the `||` default never fired and the
+// script tried to overwrite the interpreter running it (ETXTBSY). Only treat
+// the next argv slot as a path when the flag is actually there.
+const outFlag = process.argv.indexOf('--out');
+const out = (outFlag >= 0 && process.argv[outFlag + 1]) || (artifactMode ? 'dist/emeem-artifact.html' : 'dist/emeem-standalone.html');
 
 let html = readFileSync(join(DIST, 'index.html'), 'utf8');
 const assets = readdirSync(join(DIST, 'assets'));

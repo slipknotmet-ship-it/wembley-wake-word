@@ -73,8 +73,17 @@ const ROCK_COLLIDER_SHRINK = 0.82;
 
 /**
  * Trunk collider half-width = trunk bottom radius * this + pad. Slightly wider
- * than the bark so a lean can't leave the visible trunk hanging outside its own
- * collider, and still only ~a third of the canopy it holds up.
+ * than the bark, and still only ~a third of the canopy it holds up.
+ *
+ * The box is vertical while the trunk leans, so it contains the bark only up to
+ * the height where the lean has eaten the pad. Measured over a trees-only
+ * forest at TREE_LEAN_MAX, the tightest gap between bark and collider face
+ * anywhere below the player's 1.5m is 0.106m, i.e. the trunk is wholly inside
+ * its own collider everywhere the player can touch it. Higher up a leaning
+ * trunk does drift outside - up to ~0.48m at the crown, which costs nothing,
+ * since nothing collides up there. That margin, not this spread, is what
+ * bounds TREE_LEAN_MAX: raise the lean far enough and the hand starts passing
+ * through bark at head height.
  */
 const TRUNK_COLLIDER_SPREAD = 1.25;
 const TRUNK_COLLIDER_PAD = 0.05;
@@ -1080,7 +1089,14 @@ export function createWorld(ctx) {
     out.length = 0;
     const cx0 = Math.floor(min.x / CS);
     const cz0 = Math.floor(min.z / CS);
+    // A NaN corner is already harmless - every comparison below is false, so
+    // the loop runs zero times. An INFINITE one is not: `cx++` never advances
+    // past +/-Infinity and `cx <= cx1` stays true, so the 120Hz path would spin
+    // forever with no exception and no way back. Refuse the box at the door,
+    // exactly as recentre() refuses an unusable streaming centre.
+    if (!Number.isFinite(cx0) || !Number.isFinite(cz0)) return out;
     // Defensive clamp: a degenerate/huge query box must not spin the loop.
+    // With cx0/cz0 finite these are finite too, so both loops always terminate.
     const cx1 = Math.min(Math.floor(max.x / CS), cx0 + 8);
     const cz1 = Math.min(Math.floor(max.z / CS), cz0 + 8);
 
