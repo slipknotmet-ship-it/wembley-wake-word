@@ -71,9 +71,15 @@ export const CONFIG = {
     viewChunks: 3,         // chunk radius streamed around the player
     groundY: 0,
     // Obstacle density ramps with the threat level (see levels below).
-    obstaclesPerChunkBase: 5,
-    obstaclesPerChunkPerLevel: 2.2,
-    obstaclesPerChunkMax: 22,
+    obstaclesPerChunkBase: 7,
+    obstaclesPerChunkPerLevel: 2.6,
+    obstaclesPerChunkMax: 26,
+    /**
+     * Relative mix of forest props. Trees are the tall things you must go
+     * around, rocks the low things you can hop, bushes the soft clutter that
+     * breaks up sightlines without ever blocking a route.
+     */
+    propMix: { tree: 0.44, rock: 0.26, bush: 0.30 },
     obstacleMinSize: 1.1,
     obstacleMaxSize: 4.2,
     obstacleMaxHeight: 6.0,
@@ -112,6 +118,48 @@ export const CONFIG = {
     // emeem before it takes it. Must be comfortably wider than magnetRadius or
     // the anticipation has no room to play before the pickup fires.
     reachRadius: 5.2,
+
+    /**
+     * The three things you can pick up. `weight` is the relative spawn chance,
+     * `points` what taking one does to your score.
+     *
+     * The whole risk of the game lives in this table: an amaam is BIG, which
+     * makes it the easiest thing on the field to hit by accident, and it is the
+     * only thing that can take points off you. A runner is small, fast and
+     * rare, so it is the only thing worth breaking your line for while
+     * something is chasing you.
+     */
+    kinds: {
+      emeem: {
+        points: 1,
+        radius: 0.22,
+        weight: 0.72,
+        pickupRadius: 1.25,
+        glow: 7.5,
+      },
+      runner: {
+        points: 3,
+        radius: 0.15,
+        weight: 0.11,
+        // Smaller AND faster, so the generous pickup radius is what keeps it
+        // catchable at all on a phone.
+        pickupRadius: 1.15,
+        glow: 9.5,
+        speed: 4.2,          // m/s when it bolts
+        wanderSpeed: 1.1,    // m/s drifting when it has not seen you
+        fleeRadius: 7.0,     // starts running at this distance
+        turnRate: 3.4,       // rad/s - it cannot turn instantly, so it can be cornered
+      },
+      amaam: {
+        points: -2,
+        radius: 0.40,
+        weight: 0.17,
+        // Deliberately larger than its own body: an amaam should feel like
+        // something you have to actively steer AROUND, not something you brush.
+        pickupRadius: 1.45,
+        glow: 5.0,
+      },
+    },
   },
 
   // --------------------------------------------------------------- monster
@@ -154,10 +202,19 @@ export const CONFIG = {
     skyDread: 0x1a0508,
     fogCalm: 0xbfe0ff,
     fogDread: 0x2a0409,
-    groundCalm: 0x6fbf73,
-    groundDread: 0x3a2430,
-    obstacleCalm: 0x8d7b68,
-    obstacleDread: 0x4a3340,
+    // Forest floor: leaf litter and moss, not lawn.
+    groundCalm: 0x4a6b3f,
+    groundDread: 0x2a1c22,
+    // Bark.
+    obstacleCalm: 0x6b5240,
+    obstacleDread: 0x3a2830,
+    // Foliage - canopies and bushes. Darkens harder than the ground so the
+    // forest closes in visibly as the Protector escalates.
+    foliageCalm: 0x3f7a3a,
+    foliageDread: 0x241a24,
+    // Stone.
+    rockCalm: 0x8a8a86,
+    rockDread: 0x453a42,
     sunCalm: 0xfff4d6,
     sunDread: 0xff5a3c,
     /**
@@ -182,6 +239,20 @@ export const CONFIG = {
       0x4a241a, // darkest brown
     ],
     emeemTipShade: 0.78,
+
+    /**
+     * Runner tones: paler and hotter than a normal emeem so a moving speck
+     * still reads as treasure at forty metres through fog.
+     */
+    runners: [0xfff0d8, 0xffe0b0, 0xffd28f],
+    /**
+     * Amaam tones: sickly, desaturated and cold against a warm palette. The
+     * point is that you can tell one from an emeem in peripheral vision while
+     * sprinting, so the difference is HUE, not size - size only tells you once
+     * it is already too close to avoid.
+     */
+    amaams: [0x6f7a52, 0x5c6b48, 0x7d8352],
+    amaamTipShade: 0.62,
     hand: 0xf6c9a8,
     handShadow: 0xd9a483,
     monster: 0x2b1220,

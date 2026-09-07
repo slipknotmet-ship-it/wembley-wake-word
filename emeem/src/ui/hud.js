@@ -284,6 +284,15 @@ const CSS = `
   .emhud-needle::before{ top:-60px; }
 }
 
+.emhud-delta{
+  position:absolute; left:100%; top:-2px; margin-left:6px;
+  font:800 20px/1 system-ui,-apple-system,sans-serif;
+  letter-spacing:-.01em; white-space:nowrap; opacity:0;
+  text-shadow:0 2px 6px rgba(0,0,0,.65); pointer-events:none;
+  font-variant-numeric:tabular-nums;
+}
+.emhud-score{ position:relative; }
+
 .emhud-scores{
   display:flex; align-items:flex-end; justify-content:center;
   gap:clamp(18px,6vw,44px); margin-top:clamp(8px,2.4vh,18px);
@@ -394,6 +403,10 @@ export function createHUD(uiRootEl, ctx) {
   const scoreWrap = el('div', 'emhud-scorewrap', scoreBox);
   const scoreGlow = el('div', 'emhud-scoreglow', scoreWrap);
   const scoreNum = el('div', 'emhud-scorenum', scoreWrap, '0');
+  // Floats off the score on every pickup: what just happened, and whether it
+  // helped. The score number alone is not enough - it changes silently, and a
+  // player sprinting away from something does not audit an integer.
+  const scoreDelta = el('div', 'emhud-delta', scoreBox, '');
 
   /**
    * The Protector's portrait, left edge.
@@ -535,6 +548,47 @@ export function createHUD(uiRootEl, ctx) {
   }
 
   if (bus) {
+    /**
+     * Pickup feedback. A prize floats UP in its own colour; a penalty drops and
+     * shakes in red, and punches the score itself, because losing points has to
+     * feel like something going wrong rather than a number quietly getting
+     * smaller.
+     *
+     * Driven by the Web Animations API rather than CSS classes: re-triggering a
+     * CSS animation needs a class removal plus a forced reflow, and this fires
+     * several times a second during a good streak.
+     */
+    bus.on('collect', (e) => {
+      const pts = e && typeof e.points === 'number' ? e.points : 1;
+      const bad = pts < 0;
+      scoreDelta.textContent = (pts > 0 ? '+' : '') + pts;
+      scoreDelta.style.color = bad ? '#ff5a48' : (e && e.kind === 'runner' ? '#ffd15c' : '#eaf5ea');
+      try {
+        scoreDelta.animate(
+          bad
+            ? [
+                { opacity: 1, transform: 'translate(0,0) scale(1.15)' },
+                { opacity: 1, transform: 'translate(3px,7px) scale(1)' },
+                { opacity: 0, transform: 'translate(-2px,18px) scale(.95)' },
+              ]
+            : [
+                { opacity: 1, transform: 'translate(0,4px) scale(.85)' },
+                { opacity: 1, transform: 'translate(0,-6px) scale(1.2)' },
+                { opacity: 0, transform: 'translate(0,-20px) scale(1)' },
+              ],
+          { duration: bad ? 900 : 700, easing: 'cubic-bezier(.2,.8,.3,1)' },
+        );
+        if (bad) {
+          scoreNum.animate([
+            { transform: 'translateX(0)', color: '#ff5a48' },
+            { transform: 'translateX(-4px)' },
+            { transform: 'translateX(4px)' },
+            { transform: 'translateX(0)', color: '#fff' },
+          ], { duration: 380, easing: 'ease-out' });
+        }
+      } catch { /* no Web Animations: the score still updates, just plainly */ }
+    });
+
     bus.on('levelup', (e) => {
       const lvl = (e && e.level) || (stateRef && stateRef.level) || null;
       const idx = (e && typeof e.index === 'number')

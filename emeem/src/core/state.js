@@ -117,11 +117,22 @@ export function resetState() {
  * Emits 'levelup' on the bus when the tier changes.
  */
 export function addScore(bus, amount = 1) {
-  state.score += amount;
+  const before = state.score;
+  // Never below zero. An amaam costs you 2, and a score that can go negative
+  // would put the threat ladder into an index it has no entry for - and, worse,
+  // would let a player who is already losing get quietly punished twice.
+  state.score = Math.max(0, state.score + amount);
+  const gained = state.score - before;
+
   const idx = levelIndexForScore(state.score);
   if (idx !== state.levelIndex) {
+    const rose = idx > state.levelIndex;
     state.levelIndex = idx;
     state.level = levelForScore(state.score);
-    bus.emit('levelup', { index: idx, level: state.level });
+    // Only announce an ESCALATION. Dropping a tier by eating amaams should not
+    // fire the "it is getting angrier" banner, and the Protector easing back
+    // down is a reward, not an event.
+    if (rose) bus.emit('levelup', { index: idx, level: state.level });
   }
+  return gained;
 }

@@ -341,8 +341,53 @@ export function createAudio(ctx) {
    * emeems fast turns into an ascending arpeggio; it resets after ~1s without
    * a pickup so a slow scavenge stays on the root note.
    */
+  /**
+   * A dull, wet collapse for an amaam. Deliberately the opposite of the collect
+   * blip in every dimension a listener actually notices: descending instead of
+   * ascending, detuned instead of clean, muffled instead of bright, and it
+   * RESETS the combo - the streak you were building is part of what it costs
+   * you. This is the sound of a mistake and it must never be mistaken for the
+   * sound of a prize, even heard through a phone speaker while panicking.
+   */
+  function penalty() {
+    if (!live()) return;
+    try {
+      const t = ac.currentTime + 0.002;
+      combo = 0;
+      lastCollectAt = 0;
+
+      const g = ac.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.5, t + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.42);
+      const lp = ac.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.setValueAtTime(900, t);
+      lp.frequency.exponentialRampToValueAtTime(180, t + 0.38);
+      lp.connect(g).connect(master);
+
+      // Two detuned saws sliding down a tritone - the least resolved interval
+      // there is, which is the point.
+      for (const [mul, det] of [[1, 0], [0.707, 7]]) {
+        const o = ac.createOscillator();
+        o.type = 'sawtooth';
+        o.frequency.setValueAtTime(196 * mul, t);
+        o.frequency.exponentialRampToValueAtTime(72 * mul, t + 0.40);
+        o.detune.setValueAtTime(det, t);
+        o.connect(lp);
+        o.start(t);
+        o.stop(t + 0.44);
+      }
+    } catch { /* audio is never allowed to take the game down */ }
+  }
+
   function collect(e) {
     if (!live()) return;
+    // An amaam is not a pickup, it is a penalty, and it gets its own sound.
+    if (e && (e.kind === 'amaam' || (typeof e.points === 'number' && e.points < 0))) {
+      penalty();
+      return;
+    }
     try {
       const t = ac.currentTime + 0.002;
       if (t - lastCollectAt < 0.02) return; // two pickups in one frame: one blip
@@ -353,7 +398,11 @@ export function createAudio(ctx) {
       // streak plateaus into a shimmer instead of climbing out of hearing.
       const STEPS = [0, 3, 5, 7, 10, 12, 15, 17, 19, 22, 24];
       const step = STEPS[Math.min(combo, STEPS.length - 1)];
-      const f = 622.25 * semi(step); // D#5 root
+      // A runner is worth three of these, so it rings a fifth higher and gets
+      // its own place in the streak - it should sound like a bonus, not like
+      // another emeem that happened to be fast.
+      const bonus = e && e.kind === 'runner';
+      const f = (bonus ? 933.33 : 622.25) * semi(step); // D#5 root, or A#5 for a runner
 
       let dst = sfxBus;
       const pn = panNode(panFor(e && e.position));
@@ -848,5 +897,5 @@ export function createAudio(ctx) {
     }
   }
 
-  return { resume, update, collect, jump, land, roar, levelup, caught };
+  return { resume, update, collect, penalty, jump, land, roar, levelup, caught };
 }

@@ -69,7 +69,12 @@ const hud = createHUD(uiRoot, ctx);
 const touch = createTouchControls(uiRoot, ctx);
 
 // ------------------------------------------------------------------- events
-bus.on('collect', (e) => { ctx.audio.collect(e); state.stats.emeems++; });
+bus.on('collect', (e) => {
+  ctx.audio.collect(e);
+  // Count what you CAUGHT, not what you touched. An amaam is a penalty, not a
+  // pickup, and it must not inflate the run summary.
+  if (!e || typeof e.points !== 'number' || e.points > 0) state.stats.emeems++;
+});
 bus.on('jump', (e) => { ctx.audio.jump(e); state.stats.jumps++; });
 bus.on('land', (e) => ctx.audio.land(e));
 bus.on('roar', (e) => ctx.audio.roar(e));
