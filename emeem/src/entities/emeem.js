@@ -256,14 +256,31 @@ const RUNNER = defineKind('runner', KC.runner || {}, {
 });
 
 /**
- * An amaam is what an emeem looks like after something went wrong with it.
- * Nine radial segments instead of twenty and flat shading, so its outline is
- * visibly ANGULAR where an emeem is round; squashed harder, so it is a slab
- * rather than a button; and its centre is a broad dark lid instead of a bright
- * pip, so the middle of it reads as dead. It also sits low and lolls.
+ * An amaam is the full form an emeem is a small bright piece of: a wide
+ * shallow DOME, a proud AREOLA, and a small NIPPLE standing off it. Three
+ * parts, one merged geometry, one draw call.
  *
- * Cheap, too, despite being the biggest thing in the field: 162 triangles
- * against an emeem's 680.
+ * Seating, in millimetres, all measured on the built geometry rather than
+ * intended: the dome is 400 across and 232 high; the areola is a 232 disc
+ * lifted to 176.32 so its apex stands 13.92 proud, with its rim buried 12.671
+ * inside the dome surface, so it grows out of the body instead of resting on
+ * it. The two surfaces cross at 226.669, giving a 453.34 dark disc - 32.1% of
+ * the plan area against the old flat lid's 29.6%. The nipple is 62 across,
+ * stretched 1.55, its base buried 112.13 inside the areola, its apex 323.46.
+ *
+ * IT MUST STILL READ AS A HAZARD AT FORTY METRES, which is the whole reason it
+ * used to be a flat angular ring. The silhouette does not move toward the
+ * emeem: projected aspect at 40m is 0.448-0.536 for an emeem, 0.559-0.656 for
+ * the old amaam, 0.721-0.776 for this one - further away, not closer. What the
+ * old shape bought and this one has to buy back is shape-FAMILY separation,
+ * worst during the ~45% of the 9.97s precession when the crown faces away and
+ * you see a bare dome. bellyShade is the mitigation for exactly that phase: it
+ * darkens the underside so a dome seen edge-on still reads as heavy and wrong.
+ * The cold fixed halo, the colder body tones and nearly twice the radius carry
+ * the rest.
+ *
+ * 744 triangles against an emeem's 692 - the biggest thing in the field, and
+ * now the most expensive, at about +5% of the main pass with ~9 alive.
  */
 const AMAAM = defineKind('amaam', KC.amaam || {}, {
   colors: PAL.amaams,
@@ -275,9 +292,9 @@ const AMAAM = defineKind('amaam', KC.amaam || {}, {
   emissiveGain: 0.52,
   ring: true,
   haloFixed: AMAAM_HALO,
-  haloBase: 0.44,
+  haloBase: 0.50,       // +13.6% opacity at dread 0, +7.1% at dread 1
   haloGain: 0.40,
-  haloPulse: 0.15,
+  haloPulse: 0.18,
   haloRate: 1.5,        // a slow, heavy warning pulse, ~4x slower than an emeem's
   hoverY: 0.27,         // hangs low: heavy, and easier to hop over
   bobHeight: 0.15,
@@ -288,7 +305,22 @@ const AMAAM = defineKind('amaam', KC.amaam || {}, {
   tilt: 0.62,           // lolls much further off vertical than a prize
   popTime: 0.34,        // a slower death than a prize: it deflates, not pops
   burstTime: 0.46,
-  geo: { segW: 9, segH: 6, squash: 0.22, tipR: 0.56, tipSegW: 9, tipSegH: 5, tipSquash: 0.36, tipLift: 0.62 },
+  geo: {
+    // DOME: 18 x 12, squashed to 0.58 - a 400mm-radius, 232mm-high cap.
+    segW: 18, segH: 12, squash: 0.58,
+    // AREOLA: a 232mm disc lifted so its apex stands 13.92mm proud of the dome
+    // while its rim stays 12.671mm buried inside it.
+    tipR: 0.58, tipSegW: 18, tipSegH: 6, tipSquash: 0.30, tipLift: 0.76,
+    // NIPPLE: 62mm, stretched, its base buried 112.13mm inside the areola.
+    capR: 0.155, capSegW: 12, capSegH: 8, capSquash: 1.55, capLift: 0.98,
+    capShade: 0.46,
+    // BELLY: a shade ramp in METRES in the squashed geometry's own space. The
+    // band keeps everything from the equator UP at a full 1.0, so the pale rim
+    // the bullseye reads against survives; a wider band painted the equator
+    // 0.76 and put a ring within 0.6% of the areola's own 0.62, which would
+    // have merged the two tones at distance.
+    bellyShade: 0.52, bellySplit: -0.06, bellyFeather: 0.05,
+  },
 });
 
 const KIND_LIST = [EMEEM, RUNNER, AMAAM];
@@ -487,13 +519,40 @@ function paintVertexColor(geo, shade) {
 }
 
 /**
- * A collectible is a flattened base with a raised centrepiece.
+ * Same, but ramped in Y: `shade` below `split - feather`, 1 above
+ * `split + feather`, linear between. Both bounds are METRES in the geometry's
+ * own already-squashed space, not ratios - which is why they are the only two
+ * fields in a `geo` block that are not fractions.
+ */
+function paintVertexRamp(geo, shade, split, feather) {
+  const p = geo.attributes.position;
+  const n = p.count;
+  const arr = new Float32Array(n * 3);
+  const lo = split - feather;
+  const inv = 1 / (2 * feather);
+  for (let i = 0; i < n; i++) {
+    let t = (p.getY(i) - lo) * inv;
+    if (t < 0) t = 0; else if (t > 1) t = 1;
+    const sh = shade + (1 - shade) * t;
+    arr[i * 3] = sh; arr[i * 3 + 1] = sh; arr[i * 3 + 2] = sh;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(arr, 3));
+}
+
+/**
+ * A collectible is a flattened base with a raised centrepiece and - if the
+ * recipe asks for one - a third, smaller part on top of that.
  *
- * The two parts are merged into ONE geometry and told apart by a baked vertex
- * colour: white on the base, `tipShade` grey on the centrepiece. The material's
- * own colour multiplies through it, so a single material and a single draw call
- * still give a two-tone object, and every tone of a kind shares one geometry.
- * With ~80 of these live, a second draw call each would not be free.
+ * Every part merges into ONE geometry and they are told apart by a baked vertex
+ * colour. The material's own colour multiplies through it, so a single material
+ * and a single draw call still give a multi-tone object, and every tone of a
+ * kind shares one geometry. With ~54 of these live, a second draw call each
+ * would not be free.
+ *
+ * The extra parts are STRICTLY ADDITIVE. `g.capR` and `g.bellyShade` are
+ * undefined for the emeem and the runner, so both guards below are dead for
+ * them and their merged buffers come out byte-identical to before this existed
+ * - same positions, normals, uvs, colours, index and attribute order.
  */
 function buildKindGeometry(kind) {
   const g = kind.geo;
@@ -508,12 +567,21 @@ function buildKindGeometry(kind) {
   // balancing on it.
   tipGeo.translate(0, kind.radius * g.squash * g.tipLift, 0);
 
-  paintVertexColor(baseGeo, 1);
+  if (g.bellyShade > 0) paintVertexRamp(baseGeo, g.bellyShade, g.bellySplit, g.bellyFeather);
+  else paintVertexColor(baseGeo, 1);
   paintVertexColor(tipGeo, kind.tipShade);
 
-  const merged = mergeGeometries([baseGeo, tipGeo], false);
-  baseGeo.dispose();
-  tipGeo.dispose();
+  const parts = [baseGeo, tipGeo];
+  if (g.capR > 0) {
+    const capGeo = new THREE.SphereGeometry(kind.radius * g.capR, g.capSegW, g.capSegH);
+    capGeo.scale(1, g.capSquash, 1);
+    capGeo.translate(0, kind.radius * g.squash * g.capLift, 0);
+    paintVertexColor(capGeo, g.capShade);
+    parts.push(capGeo);
+  }
+
+  const merged = mergeGeometries(parts, false);
+  for (let i = 0; i < parts.length; i++) parts[i].dispose();
   merged.computeBoundingSphere();
   return merged;
 }
