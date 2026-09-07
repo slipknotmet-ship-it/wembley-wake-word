@@ -106,6 +106,12 @@ const RUBBER_START = 55;
 const RUBBER_RANGE = 45;
 const RUBBER_MAX = 1.35;
 
+/** Speed multiplier while swimming. See the derivation at its use site. */
+const SWIM_FACTOR = (() => {
+  const v = CONFIG.world && CONFIG.world.swimFactor;
+  return Number.isFinite(v) ? v : 0.72;
+})();
+
 /** Speed multiplier while a golden emeem's slow is running. */
 const SLOW_FACTOR = (() => {
   const g = CONFIG.emeem.kinds && CONFIG.emeem.kinds.golden;
@@ -348,6 +354,20 @@ export function createMonster(ctx) {
   /** True while the golden slow is running, so its onset can be detected. */
   let slowActive = false;
 
+  /**
+   * Duty cycle of obstacleSlowdown: how often the creature is actually braked
+   * to 55% by the world it is running through.
+   *
+   * This is not a curiosity. It sets the CEILING on any water "slow": open
+   * water has no colliders at all, so the creature there runs a perfectly
+   * straight line at its full target speed, while on land it pays this tax with
+   * probability p. A swim multiplier above (1 - 0.45p) would therefore make it
+   * FASTER in the lake than out of it, inverting the whole feature. Measured
+   * per tier by tools/scrape.mjs.
+   */
+  let scrapeSteps = 0;
+  let scrapeHits = 0;
+
   // Rolled once per run. The construction-time placement and the FIRST run
   // deliberately share a roll, so pressing PLAY never pops the Protector from
   // one shoulder to the other; every restart re-rolls.
@@ -546,6 +566,24 @@ export function createMonster(ctx) {
       target *= 1 + Math.min(1, (dist - RUBBER_START) / RUBBER_RANGE) * (RUBBER_MAX - 1);
     }
 
+    // --- water: it swims, and slower.
+    //
+    // THE CEILING IS MEASURED, NOT CHOSEN. On land the creature is braked to
+    // obstacleSlowdown (0.55) whenever its probe finds geometry close ahead;
+    // open water has NO colliders, so there it runs a straight line at full
+    // target speed. That makes the largest honest swim multiplier
+    // 1 - 0.45p, where p is how often it is actually braked - and p is not a
+    // guess: tools/scrape.mjs measures it per tier. It rises from 0.049 at
+    // Watching to 0.495 at THE END, because by then the world is dense enough
+    // to brake it on half of all steps. The tightest ceiling is therefore
+    // 0.777, and the design's original 0.82 would have made it FASTER in the
+    // lake than out of it at the top two tiers - the exact inverse of a lake.
+    //
+    // 0.72 sits 0.057 under that ceiling, and stays above the wader at every
+    // tier (3.31 vs 2.88 at Watching, 6.62 vs 2.88 at THE END).
+    const wet = (world && world.waterAt) ? world.waterAt(m.pos.x, m.pos.z) : 0;
+    const swimF = 1 - wet * (1 - SWIM_FACTOR);
+
     // --- golden emeem: the slow.
     //
     // The multiplier is applied AFTER the rubber band on purpose, so a slowed
@@ -554,10 +592,14 @@ export function createMonster(ctx) {
     // 9.2 * 0.55 * 1.35 = 6.83.
     const wasSlow = slowActive;
     slowActive = state.monster.slowT > 0;
-    if (slowActive) {
-      state.monster.slowT = Math.max(0, state.monster.slowT - dt);
-      target *= SLOW_FACTOR;
-    }
+    if (slowActive) state.monster.slowT = Math.max(0, state.monster.slowT - dt);
+    // The two slows COMBINE AS A MINIMUM, never as a product. Multiplying them
+    // would hand a player who takes a golden emeem and then swims 0.55 * 0.72 =
+    // 0.396 - a creature crawling at 3.6 m/s at the top tier, five metres a
+    // second slower than the player, for free. The worst slow wins; they do not
+    // stack.
+    const f = Math.min(swimF, slowActive ? SLOW_FACTOR : 1);
+    if (f < 1) target *= f;
     if (slowActive && !wasSlow) {
       // INSTANT on the way in. m.speed damps toward its target at SPEED_LERP
       // 1.6, so easing into the slow would take 1.44s to reach 90% - a quarter
@@ -610,8 +652,10 @@ export function createMonster(ctx) {
     // Clamping the threshold to the probe means an unobstructed line always
     // scores exactly at it, so only a real hit can come in under.
     const scrapeDist = Math.min(r * SCRAPE_RADII, probeLen);
+    scrapeSteps++;
     if (scraping || directClear < scrapeDist || clearAhead < scrapeDist) {
       speed *= M.obstacleSlowdown;
+      scrapeHits++;
     }
 
     const fx = -Math.sin(heading);
@@ -805,5 +849,13 @@ export function createMonster(ctx) {
     group.scale.setScalar(m.scale);
   }
 
-  return { group, fixedUpdate, update, reset };
+  return {
+    group, fixedUpdate, update, reset,
+    /** Diagnostics: obstacleSlowdown duty cycle since the last read. */
+    scrapeStats(reset) {
+      const out = { steps: scrapeSteps, hits: scrapeHits, p: scrapeSteps ? scrapeHits / scrapeSteps : 0 };
+      if (reset) { scrapeSteps = 0; scrapeHits = 0; }
+      return out;
+    },
+  };
 }

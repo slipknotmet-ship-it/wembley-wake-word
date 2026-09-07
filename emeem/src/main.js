@@ -7,6 +7,7 @@ import { createWorld } from './world/world.js';
 import { createPlayer } from './entities/player.js';
 import { createEmeems } from './entities/emeem.js';
 import { createMonster } from './entities/monster.js';
+import { createBoats } from './entities/boat.js';
 import { createTouchControls } from './ui/touch.js';
 import { createHUD } from './ui/hud.js';
 import { createAudio } from './audio/sfx.js';
@@ -65,6 +66,11 @@ ctx.world = createWorld(ctx);
 const player = createPlayer(ctx);
 const emeems = createEmeems(ctx);
 const monster = createMonster(ctx);
+// Boats share barkMaterial so they cost no new material; three meshes, three
+// draw calls, and they are only visible near a lake.
+const boats = createBoats(ctx, ctx.world.barkMaterial);
+ctx.world.group.add(boats.group);
+ctx.boats = boats;
 const hud = createHUD(uiRoot, ctx);
 const touch = createTouchControls(uiRoot, ctx);
 
@@ -106,6 +112,7 @@ function startRun() {
   resetState();
   ctx.audio.resume();
   ctx.world.reset();
+  boats.reset();
   player.reset();
   // monster.reset() BEFORE emeems.reset(). resetState() parks the monster at
   // -spawnDistance, but reset() is what actually puts it BEHIND the player at
@@ -164,6 +171,9 @@ function frame(now) {
       if (state.phase !== 'playing') break;
     }
     ctx.world.update(dt, ctx);
+    // BEFORE the emeems and the hand: while aboard the boat owns the player's
+    // XZ, and everything downstream reads that position.
+    boats.update(dt, ctx);
     emeems.update(dt, ctx);
   }
 
@@ -185,4 +195,4 @@ hud.showStart();
 requestAnimationFrame(frame);
 
 // Expose a tiny handle for the automated smoke test / manual debugging.
-window.__EMEEM__ = { ctx, state, bus, startRun, engine, world: ctx.world, player, monster, emeems, touch, CONFIG };
+window.__EMEEM__ = { ctx, state, bus, startRun, engine, world: ctx.world, player, monster, emeems, boats, touch, CONFIG };

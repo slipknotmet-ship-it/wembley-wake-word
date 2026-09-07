@@ -1,5 +1,9 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import {
+  waterAt, waterNear, lakeIndex, lakeCentreX, lakeCentreZ,
+  LAKE_HALF_X, LAKE_HALF_Z,
+} from './biome.js';
 
 /**
  * EMEEM - infinite streaming FOREST.
@@ -619,6 +623,47 @@ export function createWorld(ctx) {
   groundMesh.updateMatrix();
   group.add(groundMesh);
 
+  /**
+   * THE WATER SURFACE. One plane, one material, one draw call, moved to
+   * whichever lake is nearest rather than one mesh per lake - only ever one is
+   * within the 112m fog anyway.
+   *
+   * It sits 2cm above the ground rather than below it, because the ground is
+   * opaque and the world is flat: there is no basin to look into. What sells it
+   * is that it is TRANSPARENT and the lake bed keeps its scattered pebbles, so
+   * you see ground through water rather than a blue lid on a green field.
+   * depthWrite is off so nothing sorts behind it wrongly.
+   */
+  const waterMaterial = new THREE.MeshLambertMaterial({
+    color: 0x2f6f8f,
+    transparent: true,
+    opacity: 0.72,
+    depthWrite: false,
+  });
+  const waterMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(LAKE_HALF_X * 2, LAKE_HALF_Z * 2, 1, 1),
+    waterMaterial,
+  );
+  waterMesh.name = 'water';
+  waterMesh.rotation.x = -Math.PI / 2;
+  waterMesh.receiveShadow = false;
+  waterMesh.castShadow = false;
+  waterMesh.renderOrder = 1;
+  waterMesh.visible = false;
+  group.add(waterMesh);
+
+  /** Puts the water plane on the nearest lake, or hides it if none is close. */
+  function placeWater(px, pz) {
+    const n = lakeIndex(pz);
+    if (n < 0) { waterMesh.visible = false; return; }
+    const cz = lakeCentreZ(n);
+    // Only bother when it could be on screen at all: fogFar plus the lake's own
+    // half-depth, so it is never popped in while visible.
+    if (Math.abs(pz - cz) > W.fogFar + LAKE_HALF_Z) { waterMesh.visible = false; return; }
+    waterMesh.position.set(lakeCentreX(n), W.groundY + 0.02, cz);
+    waterMesh.visible = true;
+  }
+
   // ----------------------------------------------------------------- chunks
   /** @type {Map<number, {cx:number,cz:number,id:string,meshes:Array,colliders:Array,builtLevel:number}>} */
   const chunks = new Map();
@@ -750,6 +795,11 @@ export function createWorld(ctx) {
       const pz = originZ + inset + rng() * span;
       // Nothing at all - not even a leaf - inside the spawn keep-out circle.
       if (px * px + pz * pz < clearR * clearR) continue;
+      // Nothing standing in the lake. The INFLATED test, not a centre-point
+      // one: a slab can be 1.75m in radius, so a centre just outside the
+      // shoreline still puts most of its collider in the water - a boulder in
+      // the lake for the boat to hit.
+      if (waterNear(px, pz, visualR)) continue;
       if (overlapsPlaced(px, pz, spacing)) continue;
       spotX = px;
       spotZ = pz;
@@ -1155,7 +1205,11 @@ export function createWorld(ctx) {
       const pz = originZ + rng() * CS;
       // The spawn keep-out still applies: no clutter under the player's feet.
       if (px * px + pz * pz < W.spawnClearRadius * W.spawnClearRadius) continue;
-      if (rng() < 0.55) {
+      // Ferns do not grow in a lake. Pebbles on the BED are fine and wanted -
+      // they are what makes the transparent surface read as water over ground
+      // rather than as a blue lid - so only the foliage half is rejected.
+      const wet = waterAt(px, pz) > 0;
+      if (wet || rng() < 0.55) {
         const r = range(rng, 0.20, 0.62);
         const h = range(rng, 0.09, 0.30);
         const vi = pick(rng, ROCK_BLOBS.count);
@@ -1429,6 +1483,7 @@ export function createWorld(ctx) {
   function update(dt, c) {
     const s = (c && c.state) || ctx.state;
     recentre(s.player && s.player.pos);
+    if (s.player && s.player.pos) placeWater(s.player.pos.x, s.player.pos.z);
     streamAround(centreX, centreZ, MAX_BUILDS_PER_FRAME, s.levelIndex | 0);
     followGround(centreX, centreZ);
     applyDread(s.dread);
@@ -1454,5 +1509,11 @@ export function createWorld(ctx) {
   recentre(ctx.state.player && ctx.state.player.pos);
   primeAround(centreX, centreZ, ctx.state.levelIndex | 0);
 
-  return { group, colliders, perches, pickPerch, queryAABB, sampleGroundY, update, reset };
+  return {
+    group, colliders, perches, pickPerch, queryAABB, sampleGroundY, update, reset,
+    /** Shared so the boat costs no new material and no new draw call class. */
+    barkMaterial,
+    /** 0 on land, 1 in open water. The single source of truth for wetness. */
+    waterAt,
+  };
 }

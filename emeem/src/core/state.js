@@ -23,6 +23,12 @@ export const state = {
     grounded: false,
     groundY: 0,
     pinch: 0,           // 0..1 claw closure: 0 = neutral, 1 = thumb meets index
+    /** 1 while riding a boat, 0 otherwise. */
+    boat: 0,
+    /** Hull left, 1 -> 0, draining only while aboard. */
+    hull: 0,
+    /** 0 on land, 1 in open water. Published for the HUD and the suites. */
+    wet: 0,
     reach: 0,           // 0..1 anticipation as an emeem comes into claw range
     /**
      * Nearest live emeem, written by entities/emeem.js every frame and read by
@@ -95,6 +101,9 @@ export function resetState() {
   state.player.pinch = 0;
   state.player.reach = 0;
   state.player.grabPoint.set(0, 0, 0);
+  state.player.boat = 0;
+  state.player.hull = 0;
+  state.player.wet = 0;
   state.player.nearestEmeem.set(0, 0, 0);
   state.player.nearestEmeemDist = Infinity;
   state.player.hasNearestEmeem = false;

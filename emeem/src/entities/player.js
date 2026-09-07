@@ -149,6 +149,8 @@ export function createPlayer(ctx) {
   const state = ctx.state;
   const bus = ctx.bus;
   const P = CONFIG.player;
+  const WATER_SPEED_MUL = Number.isFinite(CONFIG.world.waterSpeedMul)
+    ? CONFIG.world.waterSpeedMul : 0.40;
   const R = P.radius;
   const H = P.height;
 
@@ -347,6 +349,21 @@ export function createPlayer(ctx) {
    * @param {object} c the game context
    */
   function fixedUpdate(dtFixed, c) {
+    // ABOARD. The boat owns x/z; skip gravity, collision and the ground clamp
+    // entirely rather than fighting them. y stays at ground level so the camera
+    // does not jolt and every height-based check downstream is untouched - the
+    // hand is lifted visually in update(), not physically.
+    //
+    // grounded stays TRUE deliberately: jump needs coyote time, coyote only
+    // refreshes from grounded, and JUMP is how you get off the boat. Force it
+    // false and disembarking becomes impossible.
+    if (state.player.boat) {
+      const p = state.player;
+      p.vel.set(0, 0, 0);
+      p.grounded = true;
+      p.pos.y = CONFIG.world.groundY;
+      return;
+    }
     const world = (c && c.world) || ctx.world;
     const p = state.player;
     const inp = state.input;
@@ -379,7 +396,23 @@ export function createPlayer(ctx) {
       // Slow as the hand commits to a grab. This is what gives the reach time
       // to play out without widening the trigger radius, and it makes taking an
       // emeem cost real ground on the Protector rather than being free.
-      const reachSpeed = P.walkSpeed * (1 - P.reachSlowdown * state.player.reach);
+      // WADING. Water costs speed and nothing else - no buoyancy, no swimming
+      // pose, no vertical anything. The ground never moves, so the hand simply
+      // walks along the bottom, slowly, with the surface across its wrists.
+      //
+      // It is meant to be lethal. At waterSpeedMul 0.40 a wader makes 2.88 m/s
+      // against a Protector swimming at 3.31 m/s even at the lowest tier, so
+      // walking in is a decision to be caught unless you have the boat. That is
+      // what makes the boat worth finding.
+      // CONFIG.world, not CONFIG.player - wetness is a property of the world,
+      // and reading it off the wrong block returned undefined, which made
+      // `1 - wet * (1 - undefined)` evaluate to NaN even on dry land, because
+      // 0 * NaN is NaN. The player simply stopped moving anywhere. The fallback
+      // is here so a missing key can never do that again.
+      const wet = (world && world.waterAt) ? world.waterAt(wx, wz) : 0;
+      const wetMul = wet > 0 ? 1 - wet * (1 - WATER_SPEED_MUL) : 1;
+      state.player.wet = wet;
+      const reachSpeed = P.walkSpeed * wetMul * (1 - P.reachSlowdown * state.player.reach);
       const ddx = dx * reachSpeed - wvx;
       const ddz = dz * reachSpeed - wvz;
       const need = Math.hypot(ddx, ddz);

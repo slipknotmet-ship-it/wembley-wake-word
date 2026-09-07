@@ -1010,6 +1010,10 @@ export function createEmeems(ctx) {
 
       const kind = pickKind(r);
       if (nearAmaam(x, z, kind)) continue;
+      // Nothing to collect on open water. Without this the lake is a fishing
+      // spot rather than a hazard, and the whole point of crossing it is that
+      // it costs you scoring time.
+      if (world && world.waterAt && world.waterAt(x, z) > 0) continue;
 
       // --- perched: sit this one on top of a rock instead of on the ground.
       //
@@ -1306,8 +1310,22 @@ export function createEmeems(ctx) {
     if (d2 < MAGNET_R2) damp = Math.sqrt(d2) / MAGNET_R;
 
     const step = e.speed * dt * damp;
-    bp.x += Math.sin(e.heading) * step;
-    bp.z += Math.cos(e.heading) * step;
+    const nx = bp.x + Math.sin(e.heading) * step;
+    const nz = bp.z + Math.cos(e.heading) * step;
+    // RUNNERS DO NOT SWIM. Nothing else stops them: a fleeing runner steers by
+    // heading alone, with no collider on open water to cut its arc - so it
+    // would wander onto the lake and sit there as the highest-value prize in
+    // the game (+3), reachable by boat at 8.6 m/s and by nothing else. A lake
+    // is meant to cost you scoring time, not be the best place to farm.
+    // Turning it back is enough; a reflection is not needed, because the
+    // heading is re-planned every frame anyway.
+    if (world && world.waterAt && world.waterAt(nx, nz) > 0) {
+      e.heading += Math.PI;
+      e.avoidT = Math.max(e.avoidT || 0, 0.35);
+    } else {
+      bp.x = nx;
+      bp.z = nz;
+    }
     // Pinned to the ground plane. Skipped inside the magnet radius, where the
     // magnet owns the height and is lifting it into the claw.
     if (d2 >= MAGNET_R2) {

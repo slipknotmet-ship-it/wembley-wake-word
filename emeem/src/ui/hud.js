@@ -156,6 +156,32 @@ const CSS = `
 .emhud-slow.emhud-ending .emhud-slowfill{ animation:emhud-slowblink .32s steps(2,end) infinite; }
 @keyframes emhud-slowblink{ 0%{opacity:1} 50%{opacity:.35} 100%{opacity:1} }
 
+/* ------------------------------------------------------------ boat hull -- */
+/* Shares the threat column with the golden-slow bar, for the same reason: both
+   answer "how much trouble am I in". Green rather than gold so a glance never
+   confuses the two, and it turns red and flashes under a quarter, because the
+   moment the hull runs out you are in open water with something faster than you
+   already swimming toward you. */
+.emhud-hull{ display:none; width:100%; flex-direction:column; align-items:center; gap:3px; }
+.emhud-hull.emhud-on{ display:flex; }
+.emhud-hullname{
+  font-size:clamp(9px,2.3vh,12px); font-weight:800;
+  letter-spacing:.24em; text-transform:uppercase; white-space:nowrap;
+  color:#bff0d0; text-shadow:0 1px 3px rgba(0,0,0,.8);
+}
+.emhud-hullbar{
+  position:relative; width:78%; height:clamp(5px,1.2vh,7px);
+  border-radius:99px; overflow:hidden;
+  background:rgba(4,12,8,.55);
+  box-shadow:inset 0 0 0 1px rgba(150,240,190,.28);
+}
+.emhud-hullfill{
+  position:absolute; inset:0; transform-origin:left center;
+  background:linear-gradient(90deg,#7fe0a8,#35c47a);
+}
+.emhud-hull.emhud-sinking .emhud-hullfill{ background:linear-gradient(90deg,#ff9a6a,#ff3b30); }
+.emhud-hull.emhud-sinking .emhud-hullname{ color:#ffc0b0; animation:emhud-slowblink .32s steps(2,end) infinite; }
+
 /* --------------------------------------------------------- threat meter -- */
 .emhud-threat{
   position:absolute;
@@ -490,6 +516,13 @@ export function createHUD(uiRootEl, ctx) {
   let slowShown = false;
   let slowEnding = false;
 
+  const hullBox = el('div', 'emhud-hull', threat);
+  el('div', 'emhud-hullname', hullBox, 'HULL');
+  const hullBar = el('div', 'emhud-hullbar', hullBox);
+  const hullFill = el('div', 'emhud-hullfill', hullBar);
+  let hullShown = false;
+  let hullSinking = false;
+
   // levelup banner
   const banner = el('div', 'emhud-banner', root);
   const bannerIn = el('div', 'emhud-banner-in', banner);
@@ -699,6 +732,25 @@ export function createHUD(uiRootEl, ctx) {
     const step = Number.isFinite(dt) ? Math.min(Math.max(dt, 0), 0.1) : 0;
 
     const playing = s.phase === 'playing';
+
+    // --- boat hull ---------------------------------------------------------
+    const aboard = playing && s.player.boat > 0;
+    if (aboard !== hullShown) {
+      hullShown = aboard;
+      hullBox.classList.toggle('emhud-on', aboard);
+    }
+    if (aboard) {
+      const h = Math.max(0, Math.min(1, s.player.hull || 0));
+      hullFill.style.transform = `scaleX(${h})`;
+      const sinking = h <= 0.25;
+      if (sinking !== hullSinking) {
+        hullSinking = sinking;
+        hullBox.classList.toggle('emhud-sinking', sinking);
+      }
+    } else if (hullSinking) {
+      hullSinking = false;
+      hullBox.classList.remove('emhud-sinking');
+    }
 
     // --- golden slow readout ---------------------------------------------
     // scaleX rather than width: a transform stays on the compositor, where a
