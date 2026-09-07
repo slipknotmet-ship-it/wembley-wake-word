@@ -421,7 +421,95 @@ console.log('\n== eight-way pad (one finger, eight directions) ==');
     ok('and still releases afterwards', bp.after.x === 0 && bp.after.z === 0, `${bp.after.x},${bp.after.z}`);
     await page.setViewportSize({ width: 932, height: 430 });
 
-    // 11. destroy() with a diagonal held
+    // 11. pressed feedback must survive the cascade. `.emtc-diag`'s quiet fill
+    //     sits LATER in the stylesheet than `.emtc-down` at equal specificity,
+    //     so unguarded it wins while the button is held: the chip stays dark
+    //     while the glyph still inverts to near-black, and the arrow VANISHES
+    //     under the thumb. Compare a diagonal against a cardinal, which is
+    //     known good, rather than against a hard-coded colour.
+    //
+    //     THE WAITS ARE LOAD-BEARING. `.emtc-btn` transitions background-color
+    //     and transform over 70ms, and getComputedStyle mid-transition returns
+    //     the INTERPOLATED value - read immediately after pointerdown it hands
+    //     back the REST colour for every button, and the assertion passes on a
+    //     broken build because both sides are equally wrong. Everything below
+    //     waits past the transition before reading.
+    // Waiting out the transition does not work here: under software
+    // rasterisation the page runs at ~5fps, so 180ms is about ONE frame and
+    // background-color/transform are still at their start values. Finish the
+    // transitions explicitly instead - deterministic, and independent of how
+    // slowly the headless compositor happens to be ticking.
+    const readStyle = (d) => page.evaluate((d) => {
+      const el = document.querySelector(`[data-dir=${d}]`);
+      if (el.getAnimations) for (const a of el.getAnimations()) { try { a.finish(); } catch { /* not finishable */ } }
+      const cs = getComputedStyle(el);
+      return {
+        bg: cs.backgroundColor,
+        fill: getComputedStyle(el.querySelector('svg')).fill,
+        down: el.className.includes('emtc-down'),
+        rect: +el.getBoundingClientRect().width.toFixed(2),
+        layout: el.offsetWidth,
+      };
+    }, d);
+    const holdRead = async (d) => {
+      await page.evaluate(({ p }) => window.__P__.fire(p.x, p.y, 'pointerdown', 101), { p: C[d] });
+      const st = await readStyle(d);
+      await page.evaluate(({ p }) => { window.__P__.fire(p.x, p.y, 'pointerup', 101); window.dispatchEvent(new Event('blur')); }, { p: C[d] });
+      return st;
+    };
+    const upRest = await readStyle('up');
+    const ulRest = await readStyle('upleft');
+    const upDown = await holdRead('up');
+    const ulDown = await holdRead('upleft');
+    ok('the press-feedback test is not vacuous',
+      upDown.down && upDown.bg !== upRest.bg,
+      `cardinal rest ${upRest.bg} -> down ${upDown.bg}`);
+    ok('pressing a diagonal changes its chip too',
+      ulDown.bg !== ulRest.bg, `rest ${ulRest.bg} -> down ${ulDown.bg}`);
+    ok('a pressed diagonal looks like a pressed cardinal',
+      ulDown.bg === upDown.bg && ulDown.fill === upDown.fill,
+      `diag ${ulDown.bg}/${ulDown.fill} vs cardinal ${upDown.bg}/${upDown.fill}`);
+
+    // 12. a re-measure taken WHILE a button is held must not cache its pressed
+    //     transform:scale(.93). If it does, the zone is 2.66px tight on every
+    //     side and stays that way (toggling the pressed class does not raise
+    //     zonesDirty), so the outer edge of that collar goes dead to
+    //     pointermove and the direction drops with the thumb still on it.
+    // The baseline MUST be the button at rest. Test 11 released a button 
+    // moments ago and its transform is still transitioning BACK over 70ms, so
+    // a naive read here returns a top a pixel or so low - which moves the probe
+    // out of the 2.66px dead band and makes this whole test pass on broken
+    // code. Finish every animation first, then assert the read really is the
+    // resting geometry before using it.
+    const geo = await page.evaluate(() => {
+      const el = document.querySelector('[data-dir=up]');
+      if (el.getAnimations) for (const a of el.getAnimations()) { try { a.finish(); } catch { /* not finishable */ } }
+      const r = el.getBoundingClientRect();
+      return { cx: r.x + r.width / 2, top: r.top, w: +r.width.toFixed(2), layout: el.offsetWidth };
+    });
+    ok('the shrink test baseline is the button at rest',
+      Math.abs(geo.w - geo.layout) < 0.01, `rect ${geo.w}px vs layout ${geo.layout}px`);
+    const edgeY = geo.top - 12.5;              // inside the 14px collar, above the button
+    await page.evaluate(({ x, y }) => window.__P__.fire(x, y, 'pointerdown', 111), { x: geo.cx, y: edgeY });
+    const held = await readStyle('up');        // finishes the transform transition
+
+    const shrink = await page.evaluate(({ x, y }) => {
+      const before = { ...window.__EMEEM__.state.input };
+      window.dispatchEvent(new Event('resize'));   // zonesDirty = true
+      window.__P__.move(x + 0.5, y, 111);          // forces measure() while still held
+      const after = { ...window.__EMEEM__.state.input };
+      window.__P__.fire(x, y, 'pointerup', 111);
+      window.dispatchEvent(new Event('blur'));
+      return { before, after };
+    }, { x: geo.cx, y: edgeY });
+    ok('the shrink test is not vacuous -- the press transform really applied',
+      held.down && held.rect < held.layout,
+      `pressed rect ${held.rect}px vs layout ${held.layout}px`);
+    ok('a press on the outer collar is grabbed', shrink.before.z === 1, `z=${shrink.before.z}`);
+    ok('re-measuring while held does not shrink the hit zone',
+      shrink.after.z === 1, `z=${shrink.after.z} after a re-measure with the button scaled`);
+
+    // 13. destroy() with a diagonal held
     const destroyed = await page.evaluate((C) => {
       window.__P__.fire(C.upright.x, C.upright.y, 'pointerdown', 95);
       window.__EMEEM__.touch.destroy();

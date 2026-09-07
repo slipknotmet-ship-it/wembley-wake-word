@@ -275,11 +275,12 @@ ${ARROW_CSS}
    NO RESTING TRANSFORM: scale(.85) would look right and would shrink
    getBoundingClientRect() to 64.6px (52.7px shrunk), which breaks both the
    62px floor the stress suite asserts and every cached zone in measure(). */
-.${PRE}-btn.${PRE}-diag{
+.${PRE}-btn.${PRE}-diag:not(.${PRE}-down){
   background:rgba(16,10,24,.24);
   border-color:rgba(255,255,255,.34);
 }
-.${PRE}-btn.${PRE}-diag .${PRE}-ico{ width:42%; height:42%; opacity:.9; }
+.${PRE}-btn.${PRE}-diag .${PRE}-ico{ width:42%; height:42%; }
+.${PRE}-btn.${PRE}-diag:not(.${PRE}-down) .${PRE}-ico{ opacity:.9; }
 
 .${PRE}-jump{
   position:absolute;
@@ -460,11 +461,30 @@ export function createTouchControls(uiRootEl, ctx) {
       const r = el.getBoundingClientRect();
       if (!r.width && !r.height) continue; // never laid out (hidden container)
       const pad = act === 'jump' ? JUMP_PAD : ARROW_PAD;
+      // getBoundingClientRect returns the TRANSFORMED box, and a button held at
+      // the moment we measure carries `${PRE}-down`, i.e. transform:scale(.93).
+      // Caching that would store the zone 2.66px tight on EVERY side (3.12px
+      // for jump at .94) and keep it that way, because toggling the pressed
+      // class does not raise zonesDirty - so the outer edge of that button's
+      // collar goes dead to pointermove for the rest of the run, and the
+      // direction is dropped with the thumb still physically on the button.
+      // Exactly the failure the `${PRE}-diag` rule refuses a resting transform
+      // to avoid; the press transform does it too, just intermittently.
+      //
+      // offsetWidth/offsetHeight are LAYOUT sizes and ignore transforms, and
+      // the default transform-origin is the centre, so a scale leaves the
+      // centre exactly where it is. Centre + layout size therefore rebuilds the
+      // untransformed border box exactly, pressed or not. (Fractional layouts
+      // round offsetWidth to an integer - at most half a pixel, against 2.66.)
+      const cx = (r.left + r.right) * 0.5;
+      const cy = (r.top + r.bottom) * 0.5;
+      const hw = (el.offsetWidth || r.width) * 0.5;
+      const hh = (el.offsetHeight || r.height) * 0.5;
       zones.push({
         act,
-        x0: r.left - pad, y0: r.top - pad,
-        x1: r.right + pad, y1: r.bottom + pad,
-        cx: (r.left + r.right) * 0.5, cy: (r.top + r.bottom) * 0.5,
+        x0: cx - hw - pad, y0: cy - hh - pad,
+        x1: cx + hw + pad, y1: cy + hh + pad,
+        cx, cy,
       });
     }
     zonesDirty = false;
