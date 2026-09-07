@@ -212,7 +212,16 @@ await page.evaluate(() => {
 // still produced a 5.26 m/s failure on a loaded box, then passed at 6.97 on a
 // quiet one, from identical code. So: run until the SIMULATION has advanced far
 // enough for convergence to be a fact, and only then read the values.
-await page.evaluate(() => { window.__T0__ = window.__EMEEM__.state.time; });
+await page.evaluate(() => {
+  // Clear any golden-emeem slow before measuring. This check is about the TIER
+  // ladder, and the bot collects whatever is nearest - which now includes
+  // goldens, since they are prizes the hand reaches for. It found one and the
+  // monster read 4.00 m/s: exactly tier 4's 7.3 * the 0.55 slow factor. That is
+  // the feature working, not the ladder failing, so take the slow out of the
+  // measurement rather than loosening the bar it would otherwise break.
+  window.__EMEEM__.state.monster.slowT = 0;
+  window.__T0__ = window.__EMEEM__.state.time;
+});
 const escalated = await page.waitForFunction(() => {
   const s = window.__EMEEM__.state;
   const settled = s.time - window.__T0__ > 3;   // 6.5x the 0.46s time constant

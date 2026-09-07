@@ -54,13 +54,20 @@ const kinds = await page.evaluate(() => new Promise((res) => {
       if (k && o.visible) seen.add(k);
     });
     g.state.input.z = 1;
-    if (++n < 300 && seen.size < 3) requestAnimationFrame(tick);
+    if (++n < 300 && seen.size < 4) requestAnimationFrame(tick);
     else res({ kinds: [...seen], frames: n });
   };
   requestAnimationFrame(tick);
 }));
 note('kinds observed', kinds.kinds.length ? kinds.kinds.join(', ') : '(none tagged with userData.kind)');
-ok('all three kinds spawn', kinds.kinds.length === 3, kinds.kinds.join(', ') || 'none');
+// FOUR kinds now: the golden emeem joined emeem/runner/amaam. Asserting the
+// exact set rather than a count, because a count passes when a kind is missing
+// and a different one has been added twice, which is precisely the mistake that
+// would hide a kind failing to spawn at all.
+const WANT_KINDS = ['emeem', 'runner', 'amaam', 'golden'];
+const missing = WANT_KINDS.filter((k) => !kinds.kinds.includes(k));
+ok('all four kinds spawn', missing.length === 0,
+  missing.length ? `missing: ${missing.join(', ')}` : kinds.kinds.join(', '));
 
 console.log('\n== scoring rules ==');
 const rules = await page.evaluate(() => {

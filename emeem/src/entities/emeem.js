@@ -126,7 +126,13 @@ function defineKind(id, raw, look) {
     id,
     points: num(raw.points, 1),
     weight: Math.max(0, num(raw.weight, 0)),
-    prize: num(raw.points, 1) > 0,
+    /**
+     * Something the hand should reach for and the player should want. Normally
+     * that is just "worth points", but the golden emeem is worth NOTHING on the
+     * scoreboard and is still the most valuable thing on the field, so a kind
+     * may say so outright.
+     */
+    prize: look.prize !== undefined ? !!look.prize : num(raw.points, 1) > 0,
 
     radius,
     pickupRadius,
@@ -151,6 +157,14 @@ function defineKind(id, raw, look) {
     haloRate: look.haloRate,            // rad/s of that breathe
     haloBase: look.haloBase,
     haloGain: look.haloGain,
+    /** Wears a halo at all. An amaam does not: its size is its warning. */
+    hasHalo: look.hasHalo !== false,
+    /** rad/s of the brightness flash; 0 (the default) means no flash. */
+    flashRate: num(look.flashRate, 0),
+    /** Amplitude of that flash on halo opacity, as a fraction of the base. */
+    flashHalo: num(look.flashHalo, 0),
+    /** ...and on the body's emissive, so the thing itself blinks, not just its glow. */
+    flashEmissive: num(look.flashEmissive, 0),
 
     // --- surface ----------------------------------------------------------
     colors: look.colors,
@@ -291,11 +305,26 @@ const AMAAM = defineKind('amaam', KC.amaam || {}, {
   emissiveBase: 0.30,
   emissiveGain: 0.52,
   ring: true,
+  /**
+   * NO AURA. Every other collectible wears one; this one is now told apart by
+   * being obviously, unmissably BIGGER instead.
+   *
+   * That is a real trade and it has to be paid for. The halo was the amaam's
+   * long-range signal - a cold ring visible through dread fog after the body
+   * itself had faded - so removing it costs the read at distance and hands the
+   * whole job to silhouette. Which is why the radius goes up in the same
+   * change, and by enough to be unmistakable rather than merely measurable:
+   * 0.52 against an emeem's 0.22 is 2.36x the width and 5.6x the plan area, so
+   * the size difference survives fog, glance and a 6.9" screen.
+   * Halo fields stay defined below and simply go unused, so restoring the aura
+   * is one flag rather than an archaeology exercise.
+   */
+  hasHalo: false,
   haloFixed: AMAAM_HALO,
-  haloBase: 0.50,       // +13.6% opacity at dread 0, +7.1% at dread 1
+  haloBase: 0.50,
   haloGain: 0.40,
   haloPulse: 0.18,
-  haloRate: 1.5,        // a slow, heavy warning pulse, ~4x slower than an emeem's
+  haloRate: 1.5,
   hoverY: 0.27,         // hangs low: heavy, and easier to hop over
   bobHeight: 0.15,
   bobSpeed: num(E.bobSpeed, 2.1) * 0.42,
@@ -323,7 +352,51 @@ const AMAAM = defineKind('amaam', KC.amaam || {}, {
   },
 });
 
-const KIND_LIST = [EMEEM, RUNNER, AMAAM];
+/**
+ * GOLDEN. Worth nothing. Slows the Protector for six seconds, and a second one
+ * RESTARTS those six rather than adding to them.
+ *
+ * IT FLASHES, and that is the point of the look rather than decoration. Every
+ * other collectible glows steadily, so the field reads as a constant field. A
+ * golden emeem is the only thing out there whose worth is time-limited and
+ * situational - it is worth nothing at all unless you are being chased - so it
+ * has to announce itself from across the forest and keep announcing it. The
+ * blink is rectified (|sin|), which lingers at the bright end and snaps through
+ * the dark, so it reads as a beacon rather than a slow breathe, and the trough
+ * never reaches zero: an emeem that vanished mid-cycle could be run straight
+ * past.
+ *
+ * Its halo is the biggest of any kind (glow 11.0 against an emeem's 7.5) and
+ * flashes with the body, so at range you see the pulse before you can resolve
+ * the shape.
+ */
+const GOLDEN = defineKind('golden', KC.golden || {}, {
+  colors: PAL.goldens,
+  tipShade: 0.72,
+  roughness: 0.28,      // the only polished thing in the field: it catches light
+  metalness: 0.0,
+  prize: true,          // worth 0 points and still the thing you want most
+  emissiveBase: 0.62,
+  emissiveGain: 0.85,
+  haloBase: 0.60,
+  haloGain: 0.40,
+  haloPulse: 0.16,
+  haloRate: 4.2,
+  // The flash itself: ~1.1 blinks a second, deep on both the halo and the body.
+  flashRate: 7.0,
+  flashHalo: 0.42,
+  flashEmissive: 0.34,
+  hoverY: num(E.hoverY, 0.34) + 0.06,   // rides a touch proud of the ordinary field
+  bobHeight: num(E.bobHeight, 0.28) * 1.15,
+  bobSpeed: num(E.bobSpeed, 2.1) * 1.25,
+  spinSpeed: num(E.spinSpeed, 1.4) * 1.6,
+  tilt: 0.30,
+  popTime: 0.26,
+  burstTime: 0.42,
+  geo: { segW: 20, segH: 12, squash: 0.34, tipR: 0.32, tipSegW: 14, tipSegH: 10, tipSquash: 1.30, tipLift: 0.74 },
+});
+
+const KIND_LIST = [EMEEM, RUNNER, AMAAM, GOLDEN];
 const KIND_WEIGHT_TOTAL = KIND_LIST.reduce((a, k) => a + k.weight, 0) || 1;
 
 // ------------------------------------------------------------- field sizing
@@ -809,7 +882,9 @@ export function createEmeems(ctx) {
     e.mesh.visible = true;
     e.glow.position.copy(e.basePos);
     e.glow.scale.setScalar(kind.glowScale);
-    e.glow.visible = true;
+    // An amaam wears no aura at all: its SIZE is the warning now, so a halo
+    // would only soften the one cue it has left.
+    e.glow.visible = kind.hasHalo;
 
     // Runner state. Tethered to where it was born; heading and meander seeded
     // per entry so a pair spawned in the same frame do not move as one.
@@ -1061,8 +1136,40 @@ export function createEmeems(ctx) {
       const a = art[k.id];
       const emissive = k.emissiveBase + k.emissiveGain * d;
       const halo = k.haloBase + k.haloGain * d;
+      // Remembered so applyFlash can ride ON these rather than fighting them -
+      // a flashing kind still has to get brighter as the world darkens.
+      a.baseEmissive = emissive;
+      a.baseHalo = halo;
       for (let j = 0; j < a.disc.length; j++) {
         a.disc[j].emissiveIntensity = emissive;
+        a.halo[j].opacity = halo;
+      }
+    }
+  }
+
+  /**
+   * Blinks the flashing kinds. Runs every frame, but only for kinds that ask
+   * for it, and writes ONE uniform per colour rather than per instance - the
+   * materials are shared across every emeem of a kind, so a golden emeem
+   * anywhere on the field flashes in step with every other one, which is what
+   * makes it read as a signal rather than as scattered noise.
+   *
+   * Rectified sine, not a plain one: |sin| spends most of its time near the
+   * bright end and snaps through the dark, so it reads as a BLINK rather than
+   * a slow breathe. The halo never goes fully dark, or a golden emeem would
+   * vanish for part of every cycle and you could run past one mid-blink.
+   */
+  function applyFlash(t) {
+    for (let i = 0; i < KIND_LIST.length; i++) {
+      const k = KIND_LIST[i];
+      if (k.flashRate <= 0) continue;
+      const a = art[k.id];
+      if (a.baseHalo === undefined) continue;
+      const w = Math.abs(Math.sin(t * k.flashRate));
+      const halo = a.baseHalo * (1 - k.flashHalo + k.flashHalo * 2 * w);
+      const emis = a.baseEmissive * (1 - k.flashEmissive + k.flashEmissive * 2 * w);
+      for (let j = 0; j < a.disc.length; j++) {
+        a.disc[j].emissiveIntensity = emis;
         a.halo[j].opacity = halo;
       }
     }
@@ -1216,6 +1323,7 @@ export function createEmeems(ctx) {
 
     if (!seeded) seed(s, world);
     applyDread(s.dread);
+    applyFlash(s.time);
 
     const px = s.player.pos.x;
     const py = s.player.pos.y; // FEET

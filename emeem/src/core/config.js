@@ -244,12 +244,50 @@ export const CONFIG = {
       },
       amaam: {
         points: -2,
-        radius: 0.40,
+        // 0.52, up from 0.40. The amaam no longer wears an aura, so SIZE is the
+        // whole warning and it has to carry the read on its own: 2.36x an
+        // emeem's width and 5.6x its plan area, which is unmistakable at a
+        // glance rather than merely measurable with a ruler.
+        radius: 0.52,
         weight: 0.17,
         // Deliberately larger than its own body: an amaam should feel like
         // something you have to actively steer AROUND, not something you brush.
-        pickupRadius: 1.45,
+        // Grown with the body so the margin past the visible edge is preserved
+        // (1.45 - 0.40 = 1.05 of reach beyond the rim; 1.57 - 0.52 keeps it).
+        pickupRadius: 1.57,
         glow: 5.0,
+      },
+      /**
+       * GOLDEN. Worth NOTHING on the scoreboard - it slows the Protector for six
+       * seconds instead, and taking a second one restarts that six rather than
+       * adding to it.
+       *
+       * It flashes. Every other collectible sits there and glows steadily; this
+       * one blinks, because it is the only thing in the field whose value is
+       * time-limited and situational, and you have to be able to spot one
+       * mid-chase without hunting for it.
+       */
+      golden: {
+        points: 0,
+        // Between an emeem's 0.22 and an amaam's 0.52: clearly a prize, clearly
+        // not an ordinary one, and never mistakable for the hazard.
+        radius: 0.30,
+        // Rare. Its only pull is the effect, so too common and the Protector is
+        // permanently neutered; too rare and nobody learns the mechanic exists.
+        weight: 0.055,
+        pickupRadius: 1.35,
+        glow: 11.0,
+        /** Seconds of slow, RESTARTED (not extended) by a second pickup. */
+        slowTime: 6.0,
+        /**
+         * The Protector's speed multiplier while slowed. 0.55 puts every tier
+         * below the player's 7.2 m/s - including the top tier's 9.2 - and keeps
+         * it there even when the long-range rubber band is at full stretch
+         * (9.2 * 0.55 * 1.35 = 6.83). So "you are faster than it" is a property
+         * of the numbers rather than something to re-check whenever the threat
+         * ladder is retuned.
+         */
+        slowFactor: 0.55,
       },
     },
   },
@@ -371,6 +409,13 @@ export const CONFIG = {
      * it is already too close to avoid.
      */
     amaams: [0x6f7a52, 0x5c6b48, 0x7d8352],
+    /**
+     * Gold, and only gold. Every other kind draws from a spread of natural
+     * tones because variety is the point; this one is a signal, so all three
+     * entries are the same metal at different temperatures. A golden emeem must
+     * never be mistaken for a lucky-coloured ordinary one.
+     */
+    goldens: [0xffd24a, 0xffc21f, 0xffe07a],
     amaamTipShade: 0.62,
     hand: 0xf6c9a8,
     handShadow: 0xd9a483,

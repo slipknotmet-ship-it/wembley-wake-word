@@ -106,6 +106,13 @@ const RUBBER_START = 55;
 const RUBBER_RANGE = 45;
 const RUBBER_MAX = 1.35;
 
+/** Speed multiplier while a golden emeem's slow is running. */
+const SLOW_FACTOR = (() => {
+  const g = CONFIG.emeem.kinds && CONFIG.emeem.kinds.golden;
+  const v = g && g.slowFactor;
+  return Number.isFinite(v) ? v : 0.55;
+})();
+
 // ---------------------------------------------------------------- physique
 
 /** Half-extent in X/Z at scale 1. The rig is ~2.2m across the shoulders; the
@@ -338,6 +345,8 @@ export function createMonster(ctx) {
   // Own clock: state.time freezes on the menu and after you are caught, but the
   // thing standing over your corpse should still breathe.
   let clock = 0;
+  /** True while the golden slow is running, so its onset can be detected. */
+  let slowActive = false;
 
   // Rolled once per run. The construction-time placement and the FIRST run
   // deliberately share a roll, so pressing PLAY never pops the Protector from
@@ -536,7 +545,31 @@ export function createMonster(ctx) {
     if (dist > RUBBER_START) {
       target *= 1 + Math.min(1, (dist - RUBBER_START) / RUBBER_RANGE) * (RUBBER_MAX - 1);
     }
-    m.speed = damp(m.speed, target, SPEED_LERP, dt);
+
+    // --- golden emeem: the slow.
+    //
+    // The multiplier is applied AFTER the rubber band on purpose, so a slowed
+    // Protector cannot buy its speed back by falling behind. 0.55 puts every
+    // tier under the player's 7.2 m/s, and keeps it there at full stretch:
+    // 9.2 * 0.55 * 1.35 = 6.83.
+    const wasSlow = slowActive;
+    slowActive = state.monster.slowT > 0;
+    if (slowActive) {
+      state.monster.slowT = Math.max(0, state.monster.slowT - dt);
+      target *= SLOW_FACTOR;
+    }
+    if (slowActive && !wasSlow) {
+      // INSTANT on the way in. m.speed damps toward its target at SPEED_LERP
+      // 1.6, so easing into the slow would take 1.44s to reach 90% - a quarter
+      // of the six seconds spent ramping, and a quarter of the effect lost
+      // (measured: +10.3m of gap instead of +12.8m at the top tier). The player
+      // has to SEE it falter the moment they take the thing.
+      m.speed = target;
+    } else {
+      // Easing OUT is deliberate, though: a snap back to full speed at t=6.0
+      // would be unreadable, and the ramp is the warning that your time is up.
+      m.speed = damp(m.speed, target, SPEED_LERP, dt);
+    }
 
     // ------------------------------------------------------------ steering
     const toPlayer = dist > 0.001 ? dirToHeading(dx, dz) : heading;
@@ -740,6 +773,8 @@ export function createMonster(ctx) {
     const m = state.monster;
     m.speed = M.baseSpeed;
     m.scale = M.baseScale;
+    m.slowT = 0;
+    slowActive = false;
     rollEntranceSide();
     placeForEntrance(ctx.world);
 
