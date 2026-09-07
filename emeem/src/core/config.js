@@ -157,6 +157,54 @@ export const CONFIG = {
     treeHeightMax: 11.0,
     // Keeps the immediate spawn area clear so you never start inside a rock.
     spawnClearRadius: 7,
+    /**
+     * Fraction of walking speed kept while wading. 0.40 -> 2.88 m/s.
+     *
+     * Pinned by the swim multiplier, not chosen freely. The Protector must
+     * catch a wader at EVERY tier or water is a free escape and the boat is
+     * decoration: at the lowest tier it swims 4.6 * 0.72 = 3.31 m/s, so the
+     * wader has to be slower than that. 0.45 (3.24 m/s) left only 0.07 m/s of
+     * margin; 0.40 leaves 0.43.
+     */
+    waterSpeedMul: 0.40,
+    /**
+     * The Protector's speed multiplier while swimming. See the long derivation
+     * at its use site in monster.js - the short version is that open water has
+     * no obstacles to brake it, so the honest ceiling is 1 - 0.45p where p is
+     * the measured braking duty cycle, and p reaches 0.495 at THE END.
+     */
+    swimFactor: 0.72,
+    /**
+     * THE BOAT.
+     *
+     * It cannot be balanced by geometry, and that is the whole design. On open
+     * water the Protector's steering degenerates to pure pursuit, so a boat
+     * holding a minimum-radius circle settles at a steady separation of about
+     * 2.2m at the top tier - outside its 1.35m reach. A boat that can circle is
+     * therefore uncatchable at EVERY tier, and no turn rate fixes it: forcing
+     * the separation inside the catch radius at 8.6 m/s would need a 5.4 rad/s
+     * turn, which is not a boat.
+     *
+     * So the bound is a FINITE RESOURCE. The hull drains at one flat rate the
+     * moment you board. A crossing takes 8.9s including acceleration, costing
+     * 0.67 of the hull - 33% of margin for a fumbled heading - and the hull is
+     * gone after 13.3s no matter what you do with it. Crossing and returning
+     * needs 1.34 and is impossible by construction, so a lake is one-way.
+     *
+     * When it swamps you are ejected into open water wading at 2.88 m/s with a
+     * swimmer closing at 3.31 to 6.62. That is the actual danger; the boat is
+     * only ever a 12-25m head start, and honestly not more.
+     */
+    boat: {
+      speed: 8.6,
+      accel: 6.0,
+      decel: 4.0,
+      turnRate: 1.9,      // rad/s. Walking turns instantly; a boat does not.
+      boardRadius: 2.2,
+      drain: 0.075,       // hull per second aboard -> 13.3s of water, ever
+      deckLift: 0.45,     // visual only: the hand rides above the waterline
+      hopOut: 1.2,        // metres of hop when you jump off
+    },
     fogNear: 26,
     /**
      * 112, down from 150. viewChunks 3 guarantees only 96m of streamed ground

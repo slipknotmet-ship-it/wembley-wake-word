@@ -96,3 +96,109 @@ export function biomeAt(x, z, scratch) {
 export const BIOME_LEAD = LEAD;
 export const BIOME_BAND = BAND;
 export const BIOME_BLEND = BLEND;
+
+/* ------------------------------------------------------------------ water */
+
+/**
+ * THE LAKE.
+ *
+ * Water is a horizontal SCALAR FIELD - 0 on land, 1 in open water - and it
+ * never touches Y. That is the decision the whole feature rests on, and it was
+ * reached by working out what lowering the ground would actually cost:
+ *
+ *   - the ground is one opaque plane, so a lake bed below it would be hidden,
+ *     and so would the player standing in it;
+ *   - player.js resolves vertically against ground-anchored boxes, so a descent
+ *     goes ballistic and re-lands dozens of times across a shoreline;
+ *   - past about 1.5m of depth the horizontal collision box stops overlapping
+ *     colliders at all, so a wader would walk straight THROUGH trees;
+ *   - the emeem placement test would drop below every collider and start
+ *     reporting "clear" unconditionally;
+ *   - the Protector's stride floor collapses at the shoreline, wedging it
+ *     exactly where it is also slowed.
+ *
+ * Every one of those disappears by not moving the ground. Water changes speed,
+ * spawning and pixels. Nothing else.
+ */
+
+/** |z| of the first lake centre. */
+export const LAKE_Z0 = 420;
+/** Metres between lake centres. */
+export const LAKE_PERIOD = 1024;
+/**
+ * Half-depth along the travel axis: an 72m crossing.
+ *
+ * Not deeper. At full dread the fog far plane closes to 112 * 0.68 = 76m, so a
+ * wider lake would be deeper than the entire visible world at the top tiers -
+ * no far shore, no landmark, nothing to tell you the crossing is finite.
+ */
+export const LAKE_HALF_Z = 36;
+/**
+ * Half-width across the travel axis. FINITE, and that is load-bearing: an
+ * endless band would let a player hold one direction forever with no far shore
+ * in that axis, which is a one-input escape from the whole game.
+ */
+export const LAKE_HALF_X = 120;
+/** Metres of taper at every edge, so the shoreline is a ramp not a cliff. */
+const LAKE_FEATHER = 10;
+
+export function lakeIndex(z) {
+  return Math.round((-z - LAKE_Z0) / LAKE_PERIOD);
+}
+export function lakeCentreZ(n) {
+  return -(LAKE_Z0 + n * LAKE_PERIOD);
+}
+/** Lakes wander across the travel axis so they are not a repeating stripe. */
+export function lakeCentreX(n) {
+  return Math.sin(n * 2.399) * 34;
+}
+
+/** 0 on land, 1 in open water, ramped over LAKE_FEATHER at the edges. */
+export function waterAt(x, z) {
+  const n = lakeIndex(z);
+  if (n < 0) return 0;
+  const dz = Math.abs(z - lakeCentreZ(n));
+  if (dz >= LAKE_HALF_Z) return 0;
+  const dx = Math.abs(x - lakeCentreX(n));
+  if (dx >= LAKE_HALF_X) return 0;
+  const fz = (LAKE_HALF_Z - dz) / LAKE_FEATHER;
+  const fx = (LAKE_HALF_X - dx) / LAKE_FEATHER;
+  const f = fz < fx ? fz : fx;
+  return f >= 1 ? 1 : f;
+}
+
+/**
+ * Conservative: true if a disc of radius r touches water at all.
+ *
+ * Prop rejection MUST use this rather than testing the centre point. A slab can
+ * be 1.75m in radius, so one whose centre sits just outside the shoreline would
+ * still put most of its collider into the lake - a boulder standing in the
+ * water that the boat then hits.
+ */
+export function waterNear(x, z, r) {
+  const n = lakeIndex(z);
+  if (n < 0) return false;
+  return Math.abs(z - lakeCentreZ(n)) < LAKE_HALF_Z + r
+      && Math.abs(x - lakeCentreX(n)) < LAKE_HALF_X + r;
+}
+
+/* ------------------------------------------------------------------- boat */
+
+/** Boats per lake, spread along the near shore. */
+export const BOATS_PER_LAKE = 3;
+/** Metres between them: wide enough to matter, close enough that one is visible. */
+const BOAT_SPACING = 56;
+
+/**
+ * Deterministic boat moorings on the NEAR (+Z) shore of lake `n`.
+ *
+ * Three, 56m apart across a 240m shore. The visible ground is about 72m wide at
+ * 30m out on the narrowest phone the suite tests, so at least one is on screen
+ * from anywhere on the approach - a boat you have to go hunting for is a boat
+ * you drown looking for.
+ */
+export function boatSpot(n, i, out) {
+  out.x = lakeCentreX(n) + (i - 1) * BOAT_SPACING;
+  out.z = lakeCentreZ(n) + LAKE_HALF_Z - 2;   // 2m inside the waterline
+  return out;
+}
