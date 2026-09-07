@@ -82,11 +82,20 @@ for (const device of DEVICES) {
     }, score);
     // Keep it away for the whole cell rather than once at the start: it closes
     // at up to 9.2 m/s, so a single shove is spent in three seconds.
+    //
+    // 50m, NOT 70. The first version parked it at 70 and then failed its own
+    // speed assertion in 8 of 24 cells - because monster.js rubber-bands beyond
+    // RUBBER_START 55m, up to RUBBER_MAX 1.35x. At 70m the multiplier is
+    // 1 + (70-55)/45 * 0.35 = 1.1167, and the numbers matched to the damping
+    // lag: THE END's 9.2 read 10.24 against a predicted 10.27. The harness was
+    // distorting the very thing it measured. 50m sits under the band, and still
+    // leaves 27m of margin after 2.5s of game time at 9.2 m/s, so the creature
+    // can neither be given free speed nor reach the 1.35m catch radius.
     const shove = setInterval(() => {
       page.evaluate(() => {
         const s = window.__EMEEM__.state;
         if (s.phase !== 'playing') return;
-        s.monster.pos.x = s.player.pos.x + 70;
+        s.monster.pos.x = s.player.pos.x + 50;
         s.monster.pos.z = s.player.pos.z;
       }).catch(() => {});
     }, 250);
