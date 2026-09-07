@@ -106,12 +106,42 @@ const RUBBER_START = 55;
 const RUBBER_RANGE = 45;
 const RUBBER_MAX = 1.35;
 
+/** Speed multiplier while a golden emeem's slow is running. */
+const SLOW_FACTOR = (() => {
+  const g = CONFIG.emeem.kinds && CONFIG.emeem.kinds.golden;
+  const v = g && g.slowFactor;
+  return Number.isFinite(v) ? v : 0.55;
+})();
+
 // ---------------------------------------------------------------- physique
 
 /** Half-extent in X/Z at scale 1. The rig is ~2.2m across the shoulders; the
  *  collision box is deliberately narrower so it does not snag on corners it
  *  visually clears. */
 const BODY_RADIUS = 0.85;
+
+/**
+ * Escape hatches for an entrance spot that lands inside a tree, ordered so the
+ * framing can only get SAFER, never worse.
+ *
+ * RADII FIRST, because on-screen X is a BEARING, not a distance: sliding from
+ * 30m to 42m along the SAME ray moves the silhouette from 0.582 to 0.616 of
+ * half-width on a 667x375 frame - three points. That axis is nearly free, so
+ * exhaust it before touching the bearing. Radii never SHRINK either: pulling
+ * the spawn in is the one fallback that costs reaction time.
+ *
+ * Only when every radius is blocked do we bend the bearing, and every bend is
+ * INWARD. That is the whole safety argument: no hatch can push the creature off
+ * the narrowest phone, because every one moves it further IN.
+ *
+ * The symmetric sweep this replaces mapped [0, +0.20, -0.20, ... +1.0, -1.0]
+ * onto the heading, so half its hatches bent OUTWARD: bearing 1.12 projects to
+ * ndc.x 1.245 - off the side of a 667x375 screen - and bearing 1.70 lands 15.4
+ * half-widths out and level with the player rather than ahead of him. One tree
+ * on the ideal spot silently cost the entire feature.
+ */
+const SPAWN_RADII  = [1, 1.2, 1.4];   // multiples of spawnDistance, never < 1
+const SPAWN_INWARD = [0, 0.10, 0.20]; // radians, always toward straight ahead
 /** Rig height at scale 1, used only to bound the collider query in Y. */
 const BODY_HEIGHT = 3.4;
 /** Kerb height it simply tramples rather than paths around, at scale 1. The
@@ -315,31 +345,61 @@ export function createMonster(ctx) {
   // Own clock: state.time freezes on the menu and after you are caught, but the
   // thing standing over your corpse should still breathe.
   let clock = 0;
+  /** True while the golden slow is running, so its onset can be detected. */
+  let slowActive = false;
+
+  // Rolled once per run. The construction-time placement and the FIRST run
+  // deliberately share a roll, so pressing PLAY never pops the Protector from
+  // one shoulder to the other; every restart re-rolls.
+  let entranceSide = Math.random() < 0.5 ? -1 : 1;
+  let firstRun = true;
+  function rollEntranceSide() {
+    if (firstRun) firstRun = false;
+    else entranceSide = Math.random() < 0.5 ? -1 : 1;
+    state.monster.entranceSide = M.spawnSide || entranceSide;
+  }
 
   /**
-   * Places the monster spawnDistance behind the player. Behind is +Z: the
-   * camera looks down -Z and you run that way, so anything at +Z is at your
-   * back. If that spot is inside a rock we sweep around the arc rather than
+   * Places the Protector spawnDistance away, spawnAngle off straight-ahead, on
+   * a randomly chosen side - so it walks into frame from one of the two top
+   * corners with its face toward you.
+   *
+   * Ahead is -Z: the camera looks down -Z and you run that way. Putting it at
+   * +Z, as this did before, hid it entirely - the camera sits 5.4m behind you
+   * and the creature 34m behind that, so it spawned off-screen and could only
+   * ever enter frame from the bottom, facing the same way the camera looks.
+   * You saw its back for the whole run.
+   *
+   * If the ideal spot is inside a rock we sweep around the heading rather than
    * spawning it embedded, never closer than minSpawnDistance.
    */
-  function placeBehindPlayer(world) {
+  function placeForEntrance(world) {
     const p = state.player.pos;
     const m = state.monster;
 
-    // Angle measured in the XZ plane from +Z (directly behind the player).
-    const OFFSETS = [0, 0.26, -0.26, 0.52, -0.52, 0.85, -0.85, 1.3, -1.3];
-    const radii = [M.spawnDistance, Math.max(M.minSpawnDistance, M.spawnDistance * 0.8)];
+    // Angles are measured in the XZ plane from +Z, which is straight BEHIND
+    // the player - that is the convention sin/cos are used with below. Pi is
+    // therefore straight ahead, up the screen, and we swing spawnAngle off it
+    // to the side rolled for this run by rollEntranceSide().
+    const side = M.spawnSide || entranceSide;
+    const BASE_A = Math.PI - M.spawnAngle * side;
     const r = BODY_RADIUS * Math.max(1, m.scale);
 
-    let bx = p.x;
-    let bz = p.z + M.spawnDistance;
+    let bx = p.x + Math.sin(BASE_A) * M.spawnDistance;
+    let bz = p.z + Math.cos(BASE_A) * M.spawnDistance;
     if (world && typeof world.queryAABB === 'function') {
       let placed = false;
-      for (let ri = 0; ri < radii.length && !placed; ri++) {
-        for (let i = 0; i < OFFSETS.length; i++) {
-          const a = OFFSETS[i];
-          const x = p.x + Math.sin(a) * radii[ri];
-          const z = p.z + Math.cos(a) * radii[ri];
+      // Distance first, bearing second, and every bend inward - see the
+      // SPAWN_RADII / SPAWN_INWARD comment. The outer loop is the bearing so
+      // that all three distances are exhausted on the ideal bearing before it
+      // is given up at all.
+      for (let ni = 0; ni < SPAWN_INWARD.length && !placed; ni++) {
+        // + side * inward bends TOWARD the screen centre for either shoulder.
+        const a = BASE_A + side * SPAWN_INWARD[ni];
+        for (let ri = 0; ri < SPAWN_RADII.length; ri++) {
+          const d = Math.max(M.minSpawnDistance, M.spawnDistance * SPAWN_RADII[ri]);
+          const x = p.x + Math.sin(a) * d;
+          const z = p.z + Math.cos(a) * d;
           const floorY = CONFIG.world.groundY + STEP_OVER * m.scale;
           _qMin.set(x - r, floorY, z - r);
           _qMax.set(x + r, floorY + BODY_HEIGHT * m.scale, z + r);
@@ -365,9 +425,11 @@ export function createMonster(ctx) {
     m.proximity = clamp01(1 - m.distanceToPlayer / 30);
   }
 
-  // Correct the seeded -Z position immediately, so the start screen is not
-  // staring at a monster loitering in front of the player. No world yet.
-  placeBehindPlayer(null);
+  // Place it immediately, so the start screen is not staring at a monster
+  // sitting wherever the state object happened to seed it. No world yet, so
+  // the obstacle sweep is skipped and the ideal heading is taken as-is.
+  rollEntranceSide();
+  placeForEntrance(null);
 
   /**
    * Picks a heading. One queryAABB fetches every collider within probe range,
@@ -483,7 +545,31 @@ export function createMonster(ctx) {
     if (dist > RUBBER_START) {
       target *= 1 + Math.min(1, (dist - RUBBER_START) / RUBBER_RANGE) * (RUBBER_MAX - 1);
     }
-    m.speed = damp(m.speed, target, SPEED_LERP, dt);
+
+    // --- golden emeem: the slow.
+    //
+    // The multiplier is applied AFTER the rubber band on purpose, so a slowed
+    // Protector cannot buy its speed back by falling behind. 0.55 puts every
+    // tier under the player's 7.2 m/s, and keeps it there at full stretch:
+    // 9.2 * 0.55 * 1.35 = 6.83.
+    const wasSlow = slowActive;
+    slowActive = state.monster.slowT > 0;
+    if (slowActive) {
+      state.monster.slowT = Math.max(0, state.monster.slowT - dt);
+      target *= SLOW_FACTOR;
+    }
+    if (slowActive && !wasSlow) {
+      // INSTANT on the way in. m.speed damps toward its target at SPEED_LERP
+      // 1.6, so easing into the slow would take 1.44s to reach 90% - a quarter
+      // of the six seconds spent ramping, and a quarter of the effect lost
+      // (measured: +10.3m of gap instead of +12.8m at the top tier). The player
+      // has to SEE it falter the moment they take the thing.
+      m.speed = target;
+    } else {
+      // Easing OUT is deliberate, though: a snap back to full speed at t=6.0
+      // would be unreadable, and the ramp is the warning that your time is up.
+      m.speed = damp(m.speed, target, SPEED_LERP, dt);
+    }
 
     // ------------------------------------------------------------ steering
     const toPlayer = dist > 0.001 ? dirToHeading(dx, dz) : heading;
@@ -687,7 +773,10 @@ export function createMonster(ctx) {
     const m = state.monster;
     m.speed = M.baseSpeed;
     m.scale = M.baseScale;
-    placeBehindPlayer(ctx.world);
+    m.slowT = 0;
+    slowActive = false;
+    rollEntranceSide();
+    placeForEntrance(ctx.world);
 
     caught = false;
     scraping = false;

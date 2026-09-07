@@ -126,7 +126,13 @@ function defineKind(id, raw, look) {
     id,
     points: num(raw.points, 1),
     weight: Math.max(0, num(raw.weight, 0)),
-    prize: num(raw.points, 1) > 0,
+    /**
+     * Something the hand should reach for and the player should want. Normally
+     * that is just "worth points", but the golden emeem is worth NOTHING on the
+     * scoreboard and is still the most valuable thing on the field, so a kind
+     * may say so outright.
+     */
+    prize: look.prize !== undefined ? !!look.prize : num(raw.points, 1) > 0,
 
     radius,
     pickupRadius,
@@ -151,6 +157,14 @@ function defineKind(id, raw, look) {
     haloRate: look.haloRate,            // rad/s of that breathe
     haloBase: look.haloBase,
     haloGain: look.haloGain,
+    /** Wears a halo at all. An amaam does not: its size is its warning. */
+    hasHalo: look.hasHalo !== false,
+    /** rad/s of the brightness flash; 0 (the default) means no flash. */
+    flashRate: num(look.flashRate, 0),
+    /** Amplitude of that flash on halo opacity, as a fraction of the base. */
+    flashHalo: num(look.flashHalo, 0),
+    /** ...and on the body's emissive, so the thing itself blinks, not just its glow. */
+    flashEmissive: num(look.flashEmissive, 0),
 
     // --- surface ----------------------------------------------------------
     colors: look.colors,
@@ -256,14 +270,31 @@ const RUNNER = defineKind('runner', KC.runner || {}, {
 });
 
 /**
- * An amaam is what an emeem looks like after something went wrong with it.
- * Nine radial segments instead of twenty and flat shading, so its outline is
- * visibly ANGULAR where an emeem is round; squashed harder, so it is a slab
- * rather than a button; and its centre is a broad dark lid instead of a bright
- * pip, so the middle of it reads as dead. It also sits low and lolls.
+ * An amaam is the full form an emeem is a small bright piece of: a wide
+ * shallow DOME, a proud AREOLA, and a small NIPPLE standing off it. Three
+ * parts, one merged geometry, one draw call.
  *
- * Cheap, too, despite being the biggest thing in the field: 162 triangles
- * against an emeem's 680.
+ * Seating, in millimetres, all measured on the built geometry rather than
+ * intended: the dome is 400 across and 232 high; the areola is a 232 disc
+ * lifted to 176.32 so its apex stands 13.92 proud, with its rim buried 12.671
+ * inside the dome surface, so it grows out of the body instead of resting on
+ * it. The two surfaces cross at 226.669, giving a 453.34 dark disc - 32.1% of
+ * the plan area against the old flat lid's 29.6%. The nipple is 62 across,
+ * stretched 1.55, its base buried 112.13 inside the areola, its apex 323.46.
+ *
+ * IT MUST STILL READ AS A HAZARD AT FORTY METRES, which is the whole reason it
+ * used to be a flat angular ring. The silhouette does not move toward the
+ * emeem: projected aspect at 40m is 0.448-0.536 for an emeem, 0.559-0.656 for
+ * the old amaam, 0.721-0.776 for this one - further away, not closer. What the
+ * old shape bought and this one has to buy back is shape-FAMILY separation,
+ * worst during the ~45% of the 9.97s precession when the crown faces away and
+ * you see a bare dome. bellyShade is the mitigation for exactly that phase: it
+ * darkens the underside so a dome seen edge-on still reads as heavy and wrong.
+ * The cold fixed halo, the colder body tones and nearly twice the radius carry
+ * the rest.
+ *
+ * 744 triangles against an emeem's 692 - the biggest thing in the field, and
+ * now the most expensive, at about +5% of the main pass with ~9 alive.
  */
 const AMAAM = defineKind('amaam', KC.amaam || {}, {
   colors: PAL.amaams,
@@ -274,11 +305,26 @@ const AMAAM = defineKind('amaam', KC.amaam || {}, {
   emissiveBase: 0.30,
   emissiveGain: 0.52,
   ring: true,
+  /**
+   * NO AURA. Every other collectible wears one; this one is now told apart by
+   * being obviously, unmissably BIGGER instead.
+   *
+   * That is a real trade and it has to be paid for. The halo was the amaam's
+   * long-range signal - a cold ring visible through dread fog after the body
+   * itself had faded - so removing it costs the read at distance and hands the
+   * whole job to silhouette. Which is why the radius goes up in the same
+   * change, and by enough to be unmistakable rather than merely measurable:
+   * 0.52 against an emeem's 0.22 is 2.36x the width and 5.6x the plan area, so
+   * the size difference survives fog, glance and a 6.9" screen.
+   * Halo fields stay defined below and simply go unused, so restoring the aura
+   * is one flag rather than an archaeology exercise.
+   */
+  hasHalo: false,
   haloFixed: AMAAM_HALO,
-  haloBase: 0.44,
+  haloBase: 0.50,
   haloGain: 0.40,
-  haloPulse: 0.15,
-  haloRate: 1.5,        // a slow, heavy warning pulse, ~4x slower than an emeem's
+  haloPulse: 0.18,
+  haloRate: 1.5,
   hoverY: 0.27,         // hangs low: heavy, and easier to hop over
   bobHeight: 0.15,
   bobSpeed: num(E.bobSpeed, 2.1) * 0.42,
@@ -288,10 +334,69 @@ const AMAAM = defineKind('amaam', KC.amaam || {}, {
   tilt: 0.62,           // lolls much further off vertical than a prize
   popTime: 0.34,        // a slower death than a prize: it deflates, not pops
   burstTime: 0.46,
-  geo: { segW: 9, segH: 6, squash: 0.22, tipR: 0.56, tipSegW: 9, tipSegH: 5, tipSquash: 0.36, tipLift: 0.62 },
+  geo: {
+    // DOME: 18 x 12, squashed to 0.58 - a 400mm-radius, 232mm-high cap.
+    segW: 18, segH: 12, squash: 0.58,
+    // AREOLA: a 232mm disc lifted so its apex stands 13.92mm proud of the dome
+    // while its rim stays 12.671mm buried inside it.
+    tipR: 0.58, tipSegW: 18, tipSegH: 6, tipSquash: 0.30, tipLift: 0.76,
+    // NIPPLE: 62mm, stretched, its base buried 112.13mm inside the areola.
+    capR: 0.155, capSegW: 12, capSegH: 8, capSquash: 1.55, capLift: 0.98,
+    capShade: 0.46,
+    // BELLY: a shade ramp in METRES in the squashed geometry's own space. The
+    // band keeps everything from the equator UP at a full 1.0, so the pale rim
+    // the bullseye reads against survives; a wider band painted the equator
+    // 0.76 and put a ring within 0.6% of the areola's own 0.62, which would
+    // have merged the two tones at distance.
+    bellyShade: 0.52, bellySplit: -0.06, bellyFeather: 0.05,
+  },
 });
 
-const KIND_LIST = [EMEEM, RUNNER, AMAAM];
+/**
+ * GOLDEN. Worth nothing. Slows the Protector for six seconds, and a second one
+ * RESTARTS those six rather than adding to them.
+ *
+ * IT FLASHES, and that is the point of the look rather than decoration. Every
+ * other collectible glows steadily, so the field reads as a constant field. A
+ * golden emeem is the only thing out there whose worth is time-limited and
+ * situational - it is worth nothing at all unless you are being chased - so it
+ * has to announce itself from across the forest and keep announcing it. The
+ * blink is rectified (|sin|), which lingers at the bright end and snaps through
+ * the dark, so it reads as a beacon rather than a slow breathe, and the trough
+ * never reaches zero: an emeem that vanished mid-cycle could be run straight
+ * past.
+ *
+ * Its halo is the biggest of any kind (glow 11.0 against an emeem's 7.5) and
+ * flashes with the body, so at range you see the pulse before you can resolve
+ * the shape.
+ */
+const GOLDEN = defineKind('golden', KC.golden || {}, {
+  colors: PAL.goldens,
+  tipShade: 0.72,
+  roughness: 0.28,      // the only polished thing in the field: it catches light
+  metalness: 0.0,
+  prize: true,          // worth 0 points and still the thing you want most
+  emissiveBase: 0.62,
+  emissiveGain: 0.85,
+  haloBase: 0.60,
+  haloGain: 0.40,
+  haloPulse: 0.16,
+  haloRate: 4.2,
+  // The flash itself: ~1.1 blinks a second, deep on both the halo and the body.
+  flashRate: 7.0,
+  flashHalo: 0.42,
+  flashEmissive: 0.34,
+  hoverY: num(E.hoverY, 0.34) + 0.06,   // rides a touch proud of the ordinary field
+  bobHeight: num(E.bobHeight, 0.28) * 1.15,
+  bobSpeed: num(E.bobSpeed, 2.1) * 1.25,
+  spinSpeed: num(E.spinSpeed, 1.4) * 1.6,
+  tilt: 0.30,
+  popTime: 0.26,
+  burstTime: 0.42,
+  geo: { segW: 20, segH: 12, squash: 0.34, tipR: 0.32, tipSegW: 14, tipSegH: 10, tipSquash: 1.30, tipLift: 0.74 },
+});
+
+const KIND_LIST = [EMEEM, RUNNER, AMAAM, GOLDEN];
 const KIND_WEIGHT_TOTAL = KIND_LIST.reduce((a, k) => a + k.weight, 0) || 1;
 
 // ------------------------------------------------------------- field sizing
@@ -334,6 +439,15 @@ const AMAAM_MIN_SPAWN_R = 11;
  * lingers behind you for a few seconds instead of blinking out on screen.
  */
 const DESPAWN_R = RING_MAX + 25;
+
+/**
+ * Fraction of ordinary emeems that spawn on top of a prop. Runners are excluded
+ * because they move, and amaams because a hazard you have to climb to reach is
+ * a hazard you will never take by accident.
+ */
+const PERCH_SHARE = num(E.perchShare, 0.22);
+/** Scratch for world.pickPerch, so a spawn attempt allocates nothing. */
+const _perch = { x: 0, y: 0, z: 0 };
 const DESPAWN_R2 = DESPAWN_R * DESPAWN_R;
 
 /**
@@ -487,13 +601,40 @@ function paintVertexColor(geo, shade) {
 }
 
 /**
- * A collectible is a flattened base with a raised centrepiece.
+ * Same, but ramped in Y: `shade` below `split - feather`, 1 above
+ * `split + feather`, linear between. Both bounds are METRES in the geometry's
+ * own already-squashed space, not ratios - which is why they are the only two
+ * fields in a `geo` block that are not fractions.
+ */
+function paintVertexRamp(geo, shade, split, feather) {
+  const p = geo.attributes.position;
+  const n = p.count;
+  const arr = new Float32Array(n * 3);
+  const lo = split - feather;
+  const inv = 1 / (2 * feather);
+  for (let i = 0; i < n; i++) {
+    let t = (p.getY(i) - lo) * inv;
+    if (t < 0) t = 0; else if (t > 1) t = 1;
+    const sh = shade + (1 - shade) * t;
+    arr[i * 3] = sh; arr[i * 3 + 1] = sh; arr[i * 3 + 2] = sh;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(arr, 3));
+}
+
+/**
+ * A collectible is a flattened base with a raised centrepiece and - if the
+ * recipe asks for one - a third, smaller part on top of that.
  *
- * The two parts are merged into ONE geometry and told apart by a baked vertex
- * colour: white on the base, `tipShade` grey on the centrepiece. The material's
- * own colour multiplies through it, so a single material and a single draw call
- * still give a two-tone object, and every tone of a kind shares one geometry.
- * With ~80 of these live, a second draw call each would not be free.
+ * Every part merges into ONE geometry and they are told apart by a baked vertex
+ * colour. The material's own colour multiplies through it, so a single material
+ * and a single draw call still give a multi-tone object, and every tone of a
+ * kind shares one geometry. With ~54 of these live, a second draw call each
+ * would not be free.
+ *
+ * The extra parts are STRICTLY ADDITIVE. `g.capR` and `g.bellyShade` are
+ * undefined for the emeem and the runner, so both guards below are dead for
+ * them and their merged buffers come out byte-identical to before this existed
+ * - same positions, normals, uvs, colours, index and attribute order.
  */
 function buildKindGeometry(kind) {
   const g = kind.geo;
@@ -508,12 +649,21 @@ function buildKindGeometry(kind) {
   // balancing on it.
   tipGeo.translate(0, kind.radius * g.squash * g.tipLift, 0);
 
-  paintVertexColor(baseGeo, 1);
+  if (g.bellyShade > 0) paintVertexRamp(baseGeo, g.bellyShade, g.bellySplit, g.bellyFeather);
+  else paintVertexColor(baseGeo, 1);
   paintVertexColor(tipGeo, kind.tipShade);
 
-  const merged = mergeGeometries([baseGeo, tipGeo], false);
-  baseGeo.dispose();
-  tipGeo.dispose();
+  const parts = [baseGeo, tipGeo];
+  if (g.capR > 0) {
+    const capGeo = new THREE.SphereGeometry(kind.radius * g.capR, g.capSegW, g.capSegH);
+    capGeo.scale(1, g.capSquash, 1);
+    capGeo.translate(0, kind.radius * g.squash * g.capLift, 0);
+    paintVertexColor(capGeo, g.capShade);
+    parts.push(capGeo);
+  }
+
+  const merged = mergeGeometries(parts, false);
+  for (let i = 0; i < parts.length; i++) parts[i].dispose();
   merged.computeBoundingSphere();
   return merged;
 }
@@ -619,6 +769,10 @@ export function createEmeems(ctx) {
       phase: 0,
       colorIndex: ci,
       respawnAt: 0,
+      // Height of the prop top this one sits on, or 0 for an ordinary ground
+      // spawn. Set on every activate path so a recycled entry can never keep a
+      // stale perch and hover over open grass.
+      perchY: 0,
       pop: 0,          // > 0 while playing the collect animation: drawn, not collectable
       listIdx: -1,     // slot in amaamList, or -1
       // runner-only state, inert for the still kinds
@@ -728,7 +882,9 @@ export function createEmeems(ctx) {
     e.mesh.visible = true;
     e.glow.position.copy(e.basePos);
     e.glow.scale.setScalar(kind.glowScale);
-    e.glow.visible = true;
+    // An amaam wears no aura at all: its SIZE is the warning now, so a halo
+    // would only soften the one cue it has left.
+    e.glow.visible = kind.hasHalo;
 
     // Runner state. Tethered to where it was born; heading and meander seeded
     // per entry so a pair spawned in the same frame do not move as one.
@@ -749,7 +905,26 @@ export function createEmeems(ctx) {
   function deactivate(e) {
     if (e.active) activeCount--;
     e.active = false;
+    e.perchY = 0;
     amaamRemove(e);
+  }
+
+  /**
+   * Is a live prize already sitting within a metre of this spot? Two prizes on
+   * the same rock top would be collected by one pass of the hand, which reads
+   * as one of them evaporating - and emeem.js has no prize-vs-prize keep-out
+   * anywhere else, because on open ground the ring sampling makes a collision
+   * vanishingly unlikely. A perch is a handful of square metres, so it does not.
+   */
+  function prizeTaken(x, z) {
+    for (let i = 0; i < pool.length; i++) {
+      const o = pool[i];
+      if (!o.active || !o.kind.prize) continue;
+      const dx = o.basePos.x - x;
+      const dz = o.basePos.z - z;
+      if (dx * dx + dz * dz < 1.0) return true;
+    }
+    return false;
   }
 
   /** Returns an entry to the pool immediately (out of range, or reset). */
@@ -835,12 +1010,37 @@ export function createEmeems(ctx) {
 
       const kind = pickKind(r);
       if (nearAmaam(x, z, kind)) continue;
+
+      // --- perched: sit this one on top of a rock instead of on the ground.
+      //
+      // activate()'s third argument is already documented as "the surface this
+      // thing sits on", not "the ground", so handing it a collider top is all a
+      // perch needs - no signature changes anywhere.
+      //
+      // blockedAt MUST be skipped on this path, and that is the single gate
+      // between the old code and this feature: it is a 0.77m XZ keep-out around
+      // every collider whose Y range always overlaps a ground-anchored box, so
+      // it is effectively a 2-D test and would reject every perch by
+      // construction - the prize is meant to be ON the prop.
+      if (kind === EMEEM && world && world.pickPerch && Math.random() < PERCH_SHARE) {
+        if (world.pickPerch(px, pz, RING_MIN, RING_MAX, prizeTaken, _perch)) {
+          const pdx = _perch.x - mx;
+          const pdz = _perch.z - mz;
+          if (pdx * pdx + pdz * pdz >= monsterKeepOut2 && !nearAmaam(_perch.x, _perch.z, kind)) {
+            activate(e, kind, _perch.x, _perch.y, _perch.z);
+            e.perchY = _perch.y;
+            return true;
+          }
+        }
+      }
+
       // Swept volume of the hovering, bobbing collectible. Anything overlapping
       // it means this one would be embedded in a prop and unreachable.
       if (blockedAt(world, x, z, kind)) continue;
 
       const gy = world ? world.sampleGroundY(x, z) : CONFIG.world.groundY;
       activate(e, kind, x, gy, z);
+      e.perchY = 0;
       return true;
     }
     return false;
@@ -936,8 +1136,40 @@ export function createEmeems(ctx) {
       const a = art[k.id];
       const emissive = k.emissiveBase + k.emissiveGain * d;
       const halo = k.haloBase + k.haloGain * d;
+      // Remembered so applyFlash can ride ON these rather than fighting them -
+      // a flashing kind still has to get brighter as the world darkens.
+      a.baseEmissive = emissive;
+      a.baseHalo = halo;
       for (let j = 0; j < a.disc.length; j++) {
         a.disc[j].emissiveIntensity = emissive;
+        a.halo[j].opacity = halo;
+      }
+    }
+  }
+
+  /**
+   * Blinks the flashing kinds. Runs every frame, but only for kinds that ask
+   * for it, and writes ONE uniform per colour rather than per instance - the
+   * materials are shared across every emeem of a kind, so a golden emeem
+   * anywhere on the field flashes in step with every other one, which is what
+   * makes it read as a signal rather than as scattered noise.
+   *
+   * Rectified sine, not a plain one: |sin| spends most of its time near the
+   * bright end and snaps through the dark, so it reads as a BLINK rather than
+   * a slow breathe. The halo never goes fully dark, or a golden emeem would
+   * vanish for part of every cycle and you could run past one mid-blink.
+   */
+  function applyFlash(t) {
+    for (let i = 0; i < KIND_LIST.length; i++) {
+      const k = KIND_LIST[i];
+      if (k.flashRate <= 0) continue;
+      const a = art[k.id];
+      if (a.baseHalo === undefined) continue;
+      const w = Math.abs(Math.sin(t * k.flashRate));
+      const halo = a.baseHalo * (1 - k.flashHalo + k.flashHalo * 2 * w);
+      const emis = a.baseEmissive * (1 - k.flashEmissive + k.flashEmissive * 2 * w);
+      for (let j = 0; j < a.disc.length; j++) {
+        a.disc[j].emissiveIntensity = emis;
         a.halo[j].opacity = halo;
       }
     }
@@ -1091,6 +1323,7 @@ export function createEmeems(ctx) {
 
     if (!seeded) seed(s, world);
     applyDread(s.dread);
+    applyFlash(s.time);
 
     const px = s.player.pos.x;
     const py = s.player.pos.y; // FEET

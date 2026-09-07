@@ -124,6 +124,38 @@ const CSS = `
 }
 .emhud-best b{ color:rgba(255,255,255,.92); font-weight:800; letter-spacing:.06em; }
 
+/* ----------------------------------------------------- golden slow timer -- */
+/* Hung UNDER the threat meter on purpose: the two are about the same thing -
+   how much trouble the Protector is - so they read as one column. It shares the
+   meter's width, so nothing here can collide with the score (top-left), BEST
+   and the portrait (top-right), the 244x244 arrow pad (bottom-left) or the JUMP
+   disc (bottom-right). It is display:none when idle, so it costs no layout at
+   all during an ordinary run. */
+.emhud-slow{
+  display:none; width:100%; flex-direction:column; align-items:center; gap:3px;
+}
+.emhud-slow.emhud-on{ display:flex; }
+.emhud-slowname{
+  font-size:clamp(9px,2.3vh,12px); font-weight:800;
+  letter-spacing:.24em; text-transform:uppercase; white-space:nowrap;
+  color:#ffe9a8; text-shadow:0 1px 3px rgba(0,0,0,.8);
+}
+.emhud-slowbar{
+  position:relative; width:78%; height:clamp(5px,1.2vh,7px);
+  border-radius:99px; overflow:hidden;
+  background:rgba(10,4,10,.55);
+  box-shadow:inset 0 0 0 1px rgba(255,220,120,.28);
+}
+.emhud-slowfill{
+  position:absolute; inset:0; transform-origin:left center;
+  background:linear-gradient(90deg,#ffe07a,#ffc21f);
+}
+/* The last second flashes, matching the emeem that bought it, so the warning
+   that your time is nearly up uses the same language as the pickup. */
+.emhud-slow.emhud-ending .emhud-slowname,
+.emhud-slow.emhud-ending .emhud-slowfill{ animation:emhud-slowblink .32s steps(2,end) infinite; }
+@keyframes emhud-slowblink{ 0%{opacity:1} 50%{opacity:.35} 100%{opacity:1} }
+
 /* --------------------------------------------------------- threat meter -- */
 .emhud-threat{
   position:absolute;
@@ -362,6 +394,18 @@ export function createHUD(uiRootEl, ctx) {
   }
 
   const CONFIG = (ctx && ctx.CONFIG) || {};
+  /**
+   * Full duration of the golden slow, so the bar knows what "full" means.
+   * Computed HERE and not at module scope: this file takes CONFIG off ctx
+   * rather than importing it, so a module-scope reference is a ReferenceError
+   * at load - which takes the whole game down, since main.js builds the HUD
+   * before anything renders.
+   */
+  const SLOW_FULL = (() => {
+    const g = CONFIG.emeem && CONFIG.emeem.kinds && CONFIG.emeem.kinds.golden;
+    const v = g && g.slowTime;
+    return Number.isFinite(v) && v > 0 ? v : 6;
+  })();
   const bus = (ctx && ctx.bus) || null;
   const stateRef = (ctx && ctx.state) || null;
   const candy = (CONFIG.palette && CONFIG.palette.emeems) || FALLBACK_CANDY;
@@ -437,6 +481,14 @@ export function createHUD(uiRootEl, ctx) {
   el('div', 'emhud-fill-warm', fill);
   const fillHot = el('div', 'emhud-fill-hot', fill);
   const barGlow = el('div', 'emhud-barglow', bar);
+
+  // The golden slow readout, inside the threat column.
+  const slowBox = el('div', 'emhud-slow', threat);
+  el('div', 'emhud-slowname', slowBox, 'SLOWED');
+  const slowBar = el('div', 'emhud-slowbar', slowBox);
+  const slowFill = el('div', 'emhud-slowfill', slowBar);
+  let slowShown = false;
+  let slowEnding = false;
 
   // levelup banner
   const banner = el('div', 'emhud-banner', root);
@@ -647,6 +699,27 @@ export function createHUD(uiRootEl, ctx) {
     const step = Number.isFinite(dt) ? Math.min(Math.max(dt, 0), 0.1) : 0;
 
     const playing = s.phase === 'playing';
+
+    // --- golden slow readout ---------------------------------------------
+    // scaleX rather than width: a transform stays on the compositor, where a
+    // width animation would relayout the bar every frame of the six seconds.
+    const slowT = playing ? (s.monster.slowT || 0) : 0;
+    const on = slowT > 0;
+    if (on !== slowShown) {
+      slowShown = on;
+      slowBox.classList.toggle('emhud-on', on);
+    }
+    if (on) {
+      slowFill.style.transform = `scaleX(${Math.max(0, Math.min(1, slowT / SLOW_FULL))})`;
+      const ending = slowT <= 1;
+      if (ending !== slowEnding) {
+        slowEnding = ending;
+        slowBox.classList.toggle('emhud-ending', ending);
+      }
+    } else if (slowEnding) {
+      slowEnding = false;
+      slowBox.classList.remove('emhud-ending');
+    }
 
     // --- the Protector's portrait and bearing -----------------------------
     // Hand the renderer the hole's rectangle in CSS pixels. Measured rather

@@ -31,6 +31,13 @@ page.on('console', (m) => { if (m.type() === 'error' && !/favicon|404/i.test(m.t
 
 await page.goto(URL, { waitUntil: 'load', timeout: 45000 });
 await page.waitForFunction(() => !!window.__EMEEM__, null, { timeout: 30000 });
+
+// Pin the Protector's entrance side. It is a coin flip in the real game, and
+// the scripted bot below walks a FIXED path - so whether that path runs toward
+// the creature or away from it decides the result. Unpinned, the same check
+// passed at 18.8m and failed at 6.2m on consecutive runs of identical code.
+// The game keeps its coin; the suite does not get to be flaky.
+await page.evaluate(() => { window.__EMEEM__.CONFIG.monster.spawnSide = -1; });
 const play = page.locator('button', { hasText: /play/i }).first();
 if (await play.count()) await play.click({ timeout: 5000 }).catch(() => {});
 await page.waitForFunction(() => window.__EMEEM__.state.phase === 'playing', null, { timeout: 10000 });
@@ -47,13 +54,20 @@ const kinds = await page.evaluate(() => new Promise((res) => {
       if (k && o.visible) seen.add(k);
     });
     g.state.input.z = 1;
-    if (++n < 300 && seen.size < 3) requestAnimationFrame(tick);
+    if (++n < 300 && seen.size < 4) requestAnimationFrame(tick);
     else res({ kinds: [...seen], frames: n });
   };
   requestAnimationFrame(tick);
 }));
 note('kinds observed', kinds.kinds.length ? kinds.kinds.join(', ') : '(none tagged with userData.kind)');
-ok('all three kinds spawn', kinds.kinds.length === 3, kinds.kinds.join(', ') || 'none');
+// FOUR kinds now: the golden emeem joined emeem/runner/amaam. Asserting the
+// exact set rather than a count, because a count passes when a kind is missing
+// and a different one has been added twice, which is precisely the mistake that
+// would hide a kind failing to spawn at all.
+const WANT_KINDS = ['emeem', 'runner', 'amaam', 'golden'];
+const missing = WANT_KINDS.filter((k) => !kinds.kinds.includes(k));
+ok('all four kinds spawn', missing.length === 0,
+  missing.length ? `missing: ${missing.join(', ')}` : kinds.kinds.join(', '));
 
 console.log('\n== scoring rules ==');
 const rules = await page.evaluate(() => {

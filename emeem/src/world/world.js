@@ -160,6 +160,8 @@ function pick(rng, n) {
 }
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+/** Config reader: falls back when a key is missing or not a finite number. */
+const num = (v, dflt) => (Number.isFinite(v) ? v : dflt);
 
 /**
  * True only for a usable streaming centre. A non-finite player coordinate is
@@ -263,6 +265,18 @@ function makeBlobPool(count, jitter, salt0) {
 const FOLIAGE_BLOBS = makeBlobPool(5, 0.17, 0x51ed);
 /** Boulders: hard, angular jitter so the facets catch the sun. */
 const ROCK_BLOBS = makeBlobPool(5, 0.31, 0x2b9f);
+
+/**
+ * Symmetric U-shaped roll on [0,1]. v is uniform on [-1,1]; raising |v| to a
+ * power BELOW one pushes it toward the ends of the band, so a rock comes out
+ * decidedly small or decidedly big and the middling ones - the ones you cannot
+ * read at a glance - are rare. P(middle third) = 3^(-1/spread).
+ */
+function sizeRoll(rng, spread) {
+  const v = rng() * 2 - 1;
+  return 0.5 + 0.5 * Math.sign(v) * Math.pow(Math.abs(v), spread);
+}
+const bandRoll = (rng, band, spread) => band[0] + (band[1] - band[0]) * sizeRoll(rng, spread);
 
 /**
  * A unit trunk: six-sided, tapered, open-ended, origin at the centre of its
@@ -448,17 +462,30 @@ export function createWorld(ctx) {
    */
   const CANOPY_FLOOR = CONFIG.camera.height + 0.15;
 
-  const TREE_H_MIN = W.obstacleMaxHeight * 0.77;
-  const TREE_H_MAX = W.obstacleMaxHeight;
-  const CROWN_R_MAX = HALF_MAX;
-  const CROWN_R_MIN = HALF_MAX * 0.38;
+  const TREE_H_MIN = W.treeHeightMin;   // 8.0
+  const TREE_H_MAX = W.treeHeightMax;   // 11.0
+  /** Crown radius ceiling as a fraction of the TREE's own height, so a tall
+   *  tree gets a proportionate canopy instead of the generic prop half-size. */
+  const CROWN_R_PER_H = 0.42;
+  const CROWN_R_MIN = 1.2;
+  /** Trunk bottom radius as a fraction of tree height: slenderness 7.2 to 11.1.
+   *  Thickness follows the TREE, not the crown - a 9m tree on the old
+   *  0.19-0.39m trunk is a broom handle. */
+  const TRUNK_R_PER_H_MIN = 0.045;
+  const TRUNK_R_PER_H_MAX = 0.069;
   const TREE_LEAN_MAX = 0.18; // radians, ~10 degrees. Breaks the warehouse look.
-  /** Height a leaning trunk gives up to its own tilt, at the worst case. */
-  const LEAN_LOSS = TREE_H_MAX * (1 - Math.cos(TREE_LEAN_MAX));
+  /** Metres the trunk TOP may wander off its base. The lean has to be capped by
+   *  DISPLACEMENT rather than by angle now: a fixed 0.18 rad on an 11m trunk
+   *  drags the canopy 1.97m sideways, which reads as a fallen tree rather than
+   *  a leaning one - and drags the bark that far outside its vertical collider. */
+  const TREE_LEAN_XZ_MAX = 1.1;
+  /** Worst-case height a leaning trunk gives up, now bounded by that displacement. */
+  const LEAN_LOSS = TREE_H_MAX - Math.sqrt(TREE_H_MAX * TREE_H_MAX - TREE_LEAN_XZ_MAX * TREE_LEAN_XZ_MAX);
   /** How far below the trunk top the lowest leaf may reach, as a fraction of crown height. */
   const CANOPY_DROP = 0.2;
-  /** Shortest crown worth drawing. Below this a tree reads as a fence post. */
-  const MIN_CROWN_H = 1.0;
+  /** Shortest crown worth drawing. 1.0 was fine on a 5m tree; on a 9.5m one it
+   *  is a flagpole. */
+  const MIN_CROWN_H = 1.8;
   /** Trunk height the canopy floor demands of a tree of total height h. */
   const minTrunkFor = (h) => (CANOPY_FLOOR + LEAN_LOSS + CANOPY_DROP * h) / (1 + CANOPY_DROP);
   /**
@@ -473,10 +500,62 @@ export function createWorld(ctx) {
    * Tall enough to jump onto and no taller. Tie it to the actual jump so a
    * change to jumpVelocity can never quietly produce un-hoppable boulders.
    */
-  const ROCK_H_MAX = Math.min(W.obstacleMaxHeight * 0.25, JUMP_APEX * 0.78);
-  const ROCK_H_MIN = Math.min(0.42, ROCK_H_MAX * 0.5);
-  const ROCK_R_MIN = HALF_MIN;
-  const ROCK_R_MAX = HALF_MAX * 0.68;
+  /**
+   * The three rock jobs, from config. Their bands are absolute metres rather
+   * than fractions of a generic prop size, because what makes a rock a platform
+   * or a wall is its height against the PLAYER's jump, not against other props.
+   *
+   * Note JUMP_APEX above is the CONTINUOUS v^2/2g and is 3.5cm low: the 120Hz
+   * integrator takes velocity first, so the discrete apex is v0*dt/2 higher.
+   * Nothing here uses JUMP_APEX any more - CONFIG.world.rockHopCeiling carries
+   * the measured 1.525 instead, and the bands are checked against it below.
+   */
+  const ROCK = W.rock;
+  const ROCK_SPREAD = num(W.rockSizeSpread, 0.55);
+  const HUMMOCK_SHARE = num(W.hummockShare, 0.30);
+  const STACK_SHARE = num(W.stackShare, 0.34);
+  /**
+   * Edge-to-edge gap of a deliberate slab/block pair, and the largest rise the
+   * pair may have. 2.15m is wide enough that you cannot fall between them by
+   * accident and short enough that the hop is one clear input.
+   * The rise stops 0.175m under the 1.525m ceiling so a mistimed launch still
+   * gets up; its lower bound (0.55, in placeRock) sits 0.20m clear of the 0.35m
+   * step-up window, so the climb is always a jump and never a teleport.
+   */
+  const STACK_GAP = 2.15;
+  const STACK_RISE_MAX = 1.35;
+  const SCATTER_PER_CHUNK = Math.max(0, Math.round(num(W.scatterPerChunk, 36)));
+
+  /**
+   * Collider tops an emeem may sit on, rebuilt beside the flat collider list.
+   * Eligibility is tested on the AABB alone, so nothing needs new metadata:
+   *   top in [0.50, 2.35]  - excludes tree trunks, whose collider runs the
+   *                          tree's whole 8-11m, and anything at ground level
+   *   min(halfX, halfZ) >= 0.70 - excludes anything too narrow to stand on
+   * Cobbles and bushes never appear because they push no collider at all.
+   * What is left is exactly the slabs and the blocks.
+   */
+  const PERCH_TOP_MIN = 0.50;
+  const PERCH_TOP_MAX = 2.35;
+  const PERCH_HALF_MIN = 0.70;
+  /** Keeps a perched emeem's disc clear of the lip: its radius plus a margin. */
+  const PERCH_INSET = num(CONFIG.emeem.radius, 0.22) + 0.30;
+  const HOP_CEIL = num(W.rockHopCeiling, 1.525);
+  const rockShares = [
+    ['cobble', num(ROCK.cobble.share, 0.30)],
+    ['slab', num(ROCK.slab.share, 0.46)],
+    ['block', num(ROCK.block.share, 0.24)],
+  ];
+  const rockShareTotal = rockShares.reduce((a, r) => a + r[1], 0) || 1;
+
+  // Build-time guards. These are the two rules the whole rock design rests on,
+  // so they fail loudly at load rather than quietly in the field.
+  if (ROCK.slab.h[1] >= HOP_CEIL) {
+    throw new Error(`world: slab top ${ROCK.slab.h[1]} must stay under the hop ceiling ${HOP_CEIL}`);
+  }
+  if (ROCK.block.h[0] <= HOP_CEIL) {
+    throw new Error(`world: block base ${ROCK.block.h[0]} must clear the hop ceiling ${HOP_CEIL}`);
+  }
 
   const BUSH_R_MIN = HALF_MIN;
   const BUSH_R_MAX = HALF_MAX * 0.62;
@@ -546,6 +625,8 @@ export function createWorld(ctx) {
 
   /** Flat live list of every world-space AABB. Rebuilt when chunks come and go. */
   const colliders = [];
+  /** Subset of `colliders` whose tops an emeem may sit on. See PERCH_TOP_MIN. */
+  const perches = [];
   let collidersDirty = false;
 
   /**
@@ -630,6 +711,25 @@ export function createWorld(ctx) {
   }
 
   /**
+   * Is an exact spot legal? Same three rules findSpot applies - inside its own
+   * chunk by `inset`, outside the spawn keep-out, clear of everything already
+   * placed - but for a position we have already chosen rather than one we are
+   * searching for. The stack partner needs this: its position is DERIVED from
+   * the slab's, so it cannot be drawn at random, but it must still pass every
+   * check, or 11.3% of partners end up outside their own chunk, where
+   * queryAABB never looks and the player walks straight through them.
+   */
+  function spotIsFree(px, pz, inset, spacing) {
+    const originX = Math.floor(px / CS) * CS;
+    const originZ = Math.floor(pz / CS) * CS;
+    if (px < originX + inset || px > originX + CS - inset) return false;
+    if (pz < originZ + inset || pz > originZ + CS - inset) return false;
+    const clearR = W.spawnClearRadius + inset;
+    if (px * px + pz * pz < clearR * clearR) return false;
+    return !overlapsPlaced(px, pz, spacing);
+  }
+
+  /**
    * Finds a legal spot for one prop, writing it to spotX/spotZ.
    *
    * `inset` keeps the prop's COLLIDER wholly inside its own chunk, which is the
@@ -658,6 +758,17 @@ export function createWorld(ctx) {
     return false;
   }
 
+  /**
+   * Guaranteed DIAGONAL gate between any two colliders placed in one chunk.
+   * The player is 0.90m across, so 1.20 leaves 30cm of squeeze. Two boxes
+   * offset at 45 degrees leave hypot(dx,dz) = D - sqrt(2)*(halfA+halfB), so
+   * demanding this spacing from every collider-bearing prop makes the gate a
+   * CONSTRUCTION rather than an accident. It matters far more now that trunk
+   * colliders are up to 2m wide instead of 1.06m.
+   */
+  const PASS_GAP = 1.20;
+  const spacingFor = (half) => half * Math.SQRT2 + (PASS_GAP - OBSTACLE_GAP) * 0.5;
+
   function pushCollider(bucket, cx, cz, halfX, halfZ, top) {
     bucket.push({
       min: new THREE.Vector3(cx - halfX, W.groundY, cz - halfZ),
@@ -679,7 +790,7 @@ export function createWorld(ctx) {
    */
   function placeTree(rng, originX, originZ, bucket) {
     const h = Math.max(range(rng, TREE_H_MIN, TREE_H_MAX), MIN_TREE_H);
-    const trunkFrac = range(rng, 0.6, 0.73);
+    const trunkFrac = range(rng, 0.62, 0.75);
     // Keep the lowest leaf above the chase camera: with the canopy reaching
     // CANOPY_DROP * crownH below the trunk top, that solves to this floor.
     const trunkH = clamp(h * trunkFrac, minTrunkFor(h), h - MIN_CROWN_H);
@@ -687,9 +798,11 @@ export function createWorld(ctx) {
     // Crown WIDTH follows crown HEIGHT. Rolling the two independently gave
     // short trees a full-width canopy, which reads as a parasol on a pole
     // rather than as a tree.
-    const crownR = clamp(crownH * range(rng, 0.78, 1.18), CROWN_R_MIN, CROWN_R_MAX);
-    const trunkR = range(rng, 0.15, 0.2) + crownR * range(rng, 0.05, 0.09);
-    const lean = range(rng, 0, TREE_LEAN_MAX);
+    const crownR = clamp(crownH * range(rng, 0.78, 1.18), CROWN_R_MIN, h * CROWN_R_PER_H);
+    const trunkR = h * range(rng, TRUNK_R_PER_H_MIN, TRUNK_R_PER_H_MAX);
+    // Cap the lean by displacement, not angle - see TREE_LEAN_XZ_MAX.
+    const leanMax = Math.min(TREE_LEAN_MAX, Math.asin(Math.min(1, TREE_LEAN_XZ_MAX / trunkH)));
+    const lean = range(rng, 0, leanMax);
     const leanDir = rng() * TAU;
     const leanXZ = Math.sin(lean) * trunkH;
 
@@ -698,7 +811,7 @@ export function createWorld(ctx) {
     // Spacing is measured trunk-to-trunk, not canopy-to-canopy: canopies are
     // meant to knit together overhead, but two trunks must always leave a gap
     // a running hand (and, for as long as it fits, the Protector) can take.
-    const spacing = Math.max(crownR * 0.72, 1.35);
+    const spacing = Math.max(crownR * 0.72, spacingFor(colliderHalf));
 
     if (!findSpot(rng, originX, originZ, colliderHalf + 0.02, spacing, visualR)) return;
     const px = spotX;
@@ -793,43 +906,135 @@ export function createWorld(ctx) {
    * about tier 4 on. Early on you both have to go around them; later it walks
    * straight through the ones you still have to jump.
    */
-  function placeRock(rng, originX, originZ, bucket) {
-    const radius = range(rng, ROCK_R_MIN, ROCK_R_MAX);
-    // Bigger boulders are taller: a 1.4m-wide stone 40cm high is a paving slab.
-    const h = clamp(
-      range(rng, radius * 0.42, radius * 1.25),
-      ROCK_H_MIN,
-      ROCK_H_MAX,
-    );
+  /** Emits one stone: mesh, optional collider, optional perch. Returns its top. */
+  function emitStone(rng, px, pz, radius, h, wantCollider, bucket) {
     const aspect = range(rng, 0.66, 1.0);
     const yaw = rng() * TAU;
     const vi = pick(rng, ROCK_BLOBS.count);
-
-    // The whole boulder is inside a circle of `radius`, so insetting by it
-    // guarantees the collider stays inside the chunk.
-    if (!findSpot(rng, originX, originZ, radius, radius, radius)) return;
-    const px = spotX;
-    const pz = spotZ;
-    addFoot(px, pz, radius);
-
     const st = range(rng, 0.82, 1.12);
-    const sr = st * range(rng, 0.97, 1.04);
-    const sg = st;
-    const sb = st * range(rng, 0.98, 1.08);
 
     composeSeated(ROCK_BLOBS, vi, radius, aspect, h, 0.4, yaw, px, pz, W.groundY);
     const g = ROCK_BLOBS.geoms[vi].clone();
     g.applyMatrix4(_mat4);
-    paint(g, W.groundY, h, sr, sg, sb);
+    paint(g, W.groundY, h, st * range(rng, 0.97, 1.04), st, st * range(rng, 0.98, 1.08));
     _stone.push(g);
 
+    if (!wantCollider) return h;
     // paint() left the real world-space extents in _ext: use them, so the
-    // collider is the stone that is actually there.
+    // collider is the stone that is actually there rather than the nominal
+    // radius, which the seat/paint path loses up to a third of.
     const cx = (_ext[0] + _ext[3]) * 0.5;
     const cz = (_ext[2] + _ext[5]) * 0.5;
     const halfX = (_ext[3] - _ext[0]) * 0.5 * ROCK_COLLIDER_SHRINK;
     const halfZ = (_ext[5] - _ext[2]) * 0.5 * ROCK_COLLIDER_SHRINK;
     pushCollider(bucket, cx, cz, halfX, halfZ, h);
+    return h;
+  }
+
+  /** Two or three foliage lobes growing out of the top of a stone. */
+  function addHummock(rng, px, pz, radius, top) {
+    const lobes = 2 + (rng() < 0.5 ? 1 : 0);
+    for (let b = 0; b < lobes; b++) {
+      const lr = radius * range(rng, 0.55, 0.85);
+      const ly = range(rng, 0.30, 0.55);
+      const ang = rng() * TAU;
+      const dist = radius * range(rng, 0.0, 0.30);
+      const vi = pick(rng, FOLIAGE_BLOBS.count);
+      composeBlob(
+        FOLIAGE_BLOBS, vi, lr, ly, lr * range(rng, 0.8, 1.0), rng() * TAU,
+        px + Math.cos(ang) * dist, W.groundY + top + ly * 0.35, pz + Math.sin(ang) * dist,
+      );
+      const lg = FOLIAGE_BLOBS.geoms[vi].clone();
+      lg.applyMatrix4(_mat4);
+      paint(lg, W.groundY, top + ly, 0.92, 1.0, 0.92);
+      _leaf.push(lg);
+    }
+  }
+
+  /**
+   * ROCK. Three jobs, and the size tells you which.
+   *
+   * COBBLE gets NO collider. Every height under the player's 0.35m STEP_HEIGHT
+   * would make tryStepUp set wy = top with no interpolation - up to 32cm in one
+   * 8.3ms frame while the camera lags at followLerp 6.5. That is the same
+   * bob-up-and-over placeBush's docstring already refuses to ship.
+   *
+   * SLAB is the platform: 0.55 to 1.40, landable from flat ground with 12.5cm
+   * of margin under the 1.525m hop ceiling.
+   *
+   * BLOCK is the climb: 1.75 to 2.30, so it can NEVER be hopped from the ground
+   * (22.5cm of margin the other way), only from a slab. It is deliberately WIDE
+   * - the width buys a forgiving landing window, not the possibility of the
+   * jump, which a narrow pillar has too.
+   *
+   * A slab may emit a block partner outright (see below). Emergent adjacency
+   * cannot do this job: two rocks that merely land near each other have
+   * uncorrelated heights, so the step between them is as likely to be 5cm - a
+   * step-up teleport - as 80cm. A readable staircase has to be built.
+   *
+   * The collider TOP is the geometry's own measured top, so you stand on the
+   * stone and not in the air above it; the sides are pulled in by
+   * ROCK_COLLIDER_SHRINK because the AABB of a round thing sticks out past it
+   * at the corners, where the visible surface has already fallen away.
+   */
+  function placeRock(rng, originX, originZ, bucket) {
+    // Pick the job first, then the size inside that job's band.
+    let roll = rng() * rockShareTotal;
+    let job = 'cobble';
+    for (let i = 0; i < rockShares.length; i++) {
+      if (roll < rockShares[i][1]) { job = rockShares[i][0]; break; }
+      roll -= rockShares[i][1];
+    }
+    const band = ROCK[job];
+    const radius = bandRoll(rng, band.r, ROCK_SPREAD);
+    const h = bandRoll(rng, band.h, ROCK_SPREAD);
+    const solid = job !== 'cobble';
+
+    // SPACING BUG, fixed here. This passed `radius` as the spacing argument,
+    // so two rocks only had to clear centre-to-centre >= rA + rB + OBSTACLE_GAP
+    // while their colliders reach 0.82*r each way. Measured over 80 sites at
+    // level 7: 7.8% of rock-rock pairs left a diagonal corridor under the 1.20m
+    // PASS_GAP this file promises, and 4.5% under the player's own 0.90m width.
+    // Those are pinches you cannot walk through, not platforms.
+    const half = radius * ROCK_COLLIDER_SHRINK;
+    const spacing = solid ? Math.max(radius, spacingFor(half)) : radius;
+    if (!findSpot(rng, originX, originZ, radius, spacing, radius)) return;
+    const px = spotX;
+    const pz = spotZ;
+    addFoot(px, pz, spacing);
+
+    const top = emitStone(rng, px, pz, radius, h, solid, bucket);
+    if (job === 'slab' && rng() < HUMMOCK_SHARE) addHummock(rng, px, pz, radius, top);
+
+    // --- the deliberate climb: a slab, then a block one hop above it.
+    if (job !== 'slab' || rng() >= STACK_SHARE) return;
+    // The rise is clamped at BOTH ends and neither bound is cosmetic. The raw
+    // bands allow a rise of exactly 0.35 - precisely STEP_HEIGHT, which would
+    // teleport the player up 35cm with no jump and no input, the cobble bug
+    // relocated to head height - and up to 1.75, which is above the 1.525
+    // ceiling and therefore not climbable at all.
+    const blockTop = clamp(
+      range(rng, top + 0.55, top + 1.35),
+      ROCK.block.h[0],
+      ROCK.block.h[1],
+    );
+    if (blockTop < top + 0.55 || blockTop > top + STACK_RISE_MAX) return;
+    const blockR = bandRoll(rng, ROCK.block.r, ROCK_SPREAD);
+    const blockHalf = blockR * ROCK_COLLIDER_SHRINK;
+    const blockSpacing = Math.max(blockR, spacingFor(blockHalf));
+    // Cardinal offsets only: an angled offset makes the realised axis-aligned
+    // face gap land anywhere in 0.55-2.30 against a designed 0.90-1.60, and
+    // only about half fall in band. On an axis the gap is exactly what we set.
+    const dir = (rng() * 4) | 0;
+    const d = half + STACK_GAP + blockHalf;
+    const bx = px + (dir === 0 ? d : dir === 1 ? -d : 0);
+    const bz = pz + (dir === 2 ? d : dir === 3 ? -d : 0);
+    // Back through findSpot, NOT emitted blind: 11.3% of blind partners left
+    // their own chunk by up to 0.97m, and queryAABB never visits a neighbouring
+    // chunk's bucket, so that is stone the player would walk straight through.
+    if (!spotIsFree(bx, bz, blockR, blockSpacing)) return;
+    addFoot(bx, bz, blockSpacing);
+    emitStone(rng, bx, bz, blockR, blockTop, true, bucket);
   }
 
   /**
@@ -937,6 +1142,45 @@ export function createWorld(ctx) {
       else placeBush(rng, originX, originZ);
     }
 
+    // SCATTER. A second, unconditional pass of collider-free clutter: pebbles
+    // and ferns, no findSpot, no footprint, no collider, no bucket entry. It
+    // exists because the obstacle budget cannot fix an empty near field on its
+    // own - the visible ground inside 15m is 131 m^2, and putting eight objects
+    // in that needs 63 props per chunk, which would be a maze rather than a
+    // forest. These merge into the SAME _stone and _leaf buffers as everything
+    // else, so they cost triangles and not a single extra draw call, and
+    // nothing about them can ever block, trip or snag anything.
+    for (let i = 0; i < SCATTER_PER_CHUNK; i++) {
+      const px = originX + rng() * CS;
+      const pz = originZ + rng() * CS;
+      // The spawn keep-out still applies: no clutter under the player's feet.
+      if (px * px + pz * pz < W.spawnClearRadius * W.spawnClearRadius) continue;
+      if (rng() < 0.55) {
+        const r = range(rng, 0.20, 0.62);
+        const h = range(rng, 0.09, 0.30);
+        const vi = pick(rng, ROCK_BLOBS.count);
+        const st = range(rng, 0.80, 1.10);
+        composeSeated(ROCK_BLOBS, vi, r, range(rng, 0.7, 1.0), h, 0.45, rng() * TAU, px, pz, W.groundY);
+        const g = ROCK_BLOBS.geoms[vi].clone();
+        g.applyMatrix4(_mat4);
+        paint(g, W.groundY, h, st * range(rng, 0.97, 1.04), st, st * range(rng, 0.98, 1.08));
+        _stone.push(g);
+      } else {
+        const lobes = 1 + (rng() < 0.45 ? 1 : 0);
+        for (let b = 0; b < lobes; b++) {
+          const lr = range(rng, 0.30, 0.78);
+          const ly = lr * range(rng, 0.45, 0.85);
+          const vi = pick(rng, FOLIAGE_BLOBS.count);
+          composeSeated(FOLIAGE_BLOBS, vi, lr, range(rng, 0.8, 1.0), ly, 0.35, rng() * TAU,
+            px + range(rng, -0.3, 0.3), pz + range(rng, -0.3, 0.3), W.groundY);
+          const lg = FOLIAGE_BLOBS.geoms[vi].clone();
+          lg.applyMatrix4(_mat4);
+          paint(lg, W.groundY, ly, 0.9, 1.0, 0.9);
+          _leaf.push(lg);
+        }
+      }
+    }
+
     const meshes = [];
     mergeInto(_bark, barkMaterial, `bark ${cx},${cz}`, meshes);
     mergeInto(_leaf, foliageMaterial, `foliage ${cx},${cz}`, meshes);
@@ -976,14 +1220,70 @@ export function createWorld(ctx) {
     collidersDirty = false;
   }
 
-  /** Refreshes the flat collider list after chunks appeared or vanished. */
+  /**
+   * Refreshes the flat collider list after chunks appeared or vanished, and the
+   * parallel list of tops an emeem may sit on. One pass, same loop: a perch
+   * list that could ever disagree with the collider list would put a prize in
+   * mid-air over a chunk that had already been freed.
+   */
   function rebuildColliderList() {
     colliders.length = 0;
+    perches.length = 0;
     for (const chunk of chunks.values()) {
       const bucket = chunk.colliders;
-      for (let i = 0; i < bucket.length; i++) colliders.push(bucket[i]);
+      for (let i = 0; i < bucket.length; i++) {
+        const c = bucket[i];
+        colliders.push(c);
+        const top = c.max.y;
+        if (top < PERCH_TOP_MIN || top > PERCH_TOP_MAX) continue;
+        const hx = (c.max.x - c.min.x) * 0.5;
+        const hz = (c.max.z - c.min.z) * 0.5;
+        if (hx < PERCH_HALF_MIN || hz < PERCH_HALF_MIN) continue;
+        perches.push(c);
+      }
     }
     collidersDirty = false;
+  }
+
+  /**
+   * Picks a perch inside the ring band and writes (x, top, z) to `out`.
+   *
+   * The jitter is bounded so the emeem's own disc always lands on real stone
+   * rather than over the lip. Returns false rather than searching hard: a
+   * failed pick just falls through to an ordinary ground spawn, and this is
+   * called up to three times a frame.
+   */
+  function pickPerch(px, pz, rMin, rMax, isTaken, out) {
+    if (collidersDirty) rebuildColliderList();
+    const n = perches.length;
+    if (n === 0) return false;
+    const r2min = rMin * rMin;
+    const r2max = rMax * rMax;
+    // Ten tries, not four. The band test is the binding constraint - only the
+    // perches inside [rMin, rMax] of the player qualify, and they are a small
+    // slice of the streamed set - so too few tries silently converts most
+    // perched spawns into ordinary ground ones and the mechanic quietly
+    // disappears. Measured at four tries the realised share was ~5% against an
+    // intended 22%. This still allocates nothing and still gives up rather than
+    // searching hard.
+    for (let t = 0; t < 10; t++) {
+      const c = perches[(Math.random() * n) | 0];
+      const cx = (c.min.x + c.max.x) * 0.5;
+      const cz = (c.min.z + c.max.z) * 0.5;
+      const dx = cx - px;
+      const dz = cz - pz;
+      const d2 = dx * dx + dz * dz;
+      if (d2 < r2min || d2 > r2max) continue;
+      const hx = (c.max.x - c.min.x) * 0.5;
+      const hz = (c.max.z - c.min.z) * 0.5;
+      const j = Math.max(0, Math.min(hx, hz) - PERCH_INSET);
+      const x = cx + (Math.random() * 2 - 1) * j;
+      const z = cz + (Math.random() * 2 - 1) * j;
+      if (isTaken && isTaken(x, z)) continue;
+      out.x = x; out.y = c.max.y; out.z = z;
+      return true;
+    }
+    return false;
   }
 
   // ------------------------------------------------------------- streaming
@@ -1154,5 +1454,5 @@ export function createWorld(ctx) {
   recentre(ctx.state.player && ctx.state.player.pos);
   primeAround(centreX, centreZ, ctx.state.levelIndex | 0);
 
-  return { group, colliders, queryAABB, sampleGroundY, update, reset };
+  return { group, colliders, perches, pickPerch, queryAABB, sampleGroundY, update, reset };
 }

@@ -222,9 +222,13 @@ export function createRenderer(canvasEl) {
       // tiers the monster moves at 9.2 m/s through a world that is 22 obstacles
       // per chunk thick - about five seconds of warning, most of it spent
       // unable to see what you are about to run into. Atmospheric, unplayable.
-      // 0.50 still collapses the world around you without blinding you in it.
+      // 0.68, not the 0.50 this carried while fogFar was 150. The multiplier is
+      // calibrated against an ABSOLUTE visibility floor, not a ratio: 150*0.50
+      // gave 75m at dread 1, and 112*0.50 would give 56m - a whisker above the
+      // ~51m measured unplayable above. 112*0.68 = 76.2m restores it.
+      // Re-derive this if fogFar moves again.
       scene.fog.near = lerp(CONFIG.world.fogNear, CONFIG.world.fogNear * 0.42, d);
-      scene.fog.far = lerp(CONFIG.world.fogFar, CONFIG.world.fogFar * 0.50, d);
+      scene.fog.far = lerp(CONFIG.world.fogFar, CONFIG.world.fogFar * 0.68, d);
     }
 
     sun.color.copy(sunCalmC).lerp(sunDreadC, d);
@@ -578,8 +582,28 @@ export function createRenderer(canvasEl) {
     scene.background = keepBg;
   }
 
+  /**
+   * Draw-call/triangle counts for the MAIN pass, captured before the portrait
+   * pass overwrites them.
+   *
+   * renderer.info.autoReset is true, so every renderer.render() call clears
+   * info.render and refills it with just that pass. render() draws the world
+   * and THEN the 100px monster portrait, so anything reading renderer.info
+   * afterwards is reading the PORTRAIT: a steady 20 calls and 5,530 triangles
+   * that never moves when the world changes, because it is not measuring the
+   * world. The smoke suite asserted on that number for a long time, and it was
+   * reported as the game's cost. The main pass is really ~186 calls and
+   * ~47,500 triangles. Snapshot it here, the one point where it is still true.
+   */
+  const gpu = { calls: 0, triangles: 0, points: 0, lines: 0 };
+
   function render() {
     renderer.render(scene, camera);
+    const ri = renderer.info.render;
+    gpu.calls = ri.calls;
+    gpu.triangles = ri.triangles;
+    gpu.points = ri.points;
+    gpu.lines = ri.lines;
     renderPortrait();
   }
 
@@ -610,5 +634,8 @@ export function createRenderer(canvasEl) {
   return {
     renderer, scene, camera, sun, hemi, resize, render, reset, update, setDread,
     setPortraitSubject, setPortraitRect, PORTRAIT_LAYER,
+    /** Main-pass draw stats. See the comment on `gpu` above before trusting
+     *  renderer.info directly - it holds the portrait's numbers, not these. */
+    gpu,
   };
 }

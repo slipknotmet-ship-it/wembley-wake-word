@@ -3,7 +3,11 @@ name: Publish Emeem to the web
 # Builds the game and serves it from GitHub Pages, which gives a plain public
 # URL that any phone can open with no login and nothing to install:
 #
-#   https://slipknotmet-ship-it.github.io/wembley-wake-word/
+#   https://<owner>.github.io/<repo>/
+#
+# Deliberately not spelled out: renaming the repository changes that URL, and a
+# hardcoded one here would be quietly wrong from the moment it happened. The
+# deploy job prints the real address it published to.
 #
 # Run it from the Actions tab, or let it fire on any push that touches the game.
 
@@ -46,8 +50,9 @@ jobs:
       - name: Build
         run: npm run build
 
-      # Pages serves from a subpath (/wembley-wake-word/), which is exactly why
-      # vite.config.js sets base to './' - absolute asset URLs would 404 there.
+      # Pages serves from a subpath named after the repository, which is exactly
+      # why vite.config.js sets base to './' - absolute asset URLs would 404
+      # there, and relative ones survive the repo being renamed.
       # No `enablement: true` here. Creating a Pages site for the first time
       # needs admin rights, and GITHUB_TOKEN does not have them - it fails with
       # "Resource not accessible by integration". Pages has to be switched on

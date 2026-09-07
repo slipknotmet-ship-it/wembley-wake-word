@@ -71,22 +71,102 @@ export const CONFIG = {
     viewChunks: 3,         // chunk radius streamed around the player
     groundY: 0,
     // Obstacle density ramps with the threat level (see levels below).
-    obstaclesPerChunkBase: 7,
-    obstaclesPerChunkPerLevel: 2.6,
-    obstaclesPerChunkMax: 26,
+    // The COLLIDER-BEARING budget. Raised because the near field was measurably
+    // empty: the visible ground inside 15m of the player is 131 m^2, and at the
+    // old density of 7 props per 32m chunk (0.006836/m^2) that is 0.90 props
+    // TOTAL - less than one object. That is the "lawn" complaint, quantified.
+    // Raising this alone cannot fix it (8 objects in 131 m^2 needs 63 props per
+    // chunk, which would be a maze), so the fill comes from the collider-free
+    // scatter pass below and this budget only has to stop the near field being
+    // literally bare.
+    obstaclesPerChunkBase: 11,
+    obstaclesPerChunkPerLevel: 3.0,
+    obstaclesPerChunkMax: 34,
     /**
      * Relative mix of forest props. Trees are the tall things you must go
      * around, rocks the low things you can hop, bushes the soft clutter that
      * breaks up sightlines without ever blocking a route.
      */
-    propMix: { tree: 0.44, rock: 0.26, bush: 0.30 },
+    propMix: { tree: 0.30, rock: 0.42, bush: 0.28 },
+    /**
+     * Collider-free clutter, per chunk, level-independent. Pebbles and ferns
+     * merged into the SAME stone/foliage buffers as everything else, so they
+     * cost triangles and no draw calls. This is what actually fills the near
+     * field: 36 per chunk is 0.035/m^2, about 4.6 in the visible 131 m^2,
+     * against 0.90 before.
+     */
+    scatterPerChunk: 36,
+    /**
+     * Rocks come in three jobs and a rock's SIZE tells you which.
+     *
+     * COBBLE   - clutter, and NO collider: every height under the player's
+     *            0.35m STEP_HEIGHT makes step-up teleport the hand up to 32cm
+     *            in a single 8.3ms frame while the camera lags at followLerp
+     *            6.5. That is the bob-up-and-over placeBush already refuses.
+     * SLAB     - the platform. Landable from flat ground.
+     * BLOCK    - the climb. NEVER landable from the ground (see rockHopCeiling),
+     *            only from a slab, and wide enough that the landing is forgiving.
+     */
+    rock: {
+      cobble: { share: 0.30, h: [0.16, 0.32], r: [0.34, 0.92] },
+      slab:   { share: 0.46, h: [0.55, 1.40], r: [1.05, 1.75] },
+      block:  { share: 0.24, h: [1.75, 2.30], r: [1.22, 1.60] },
+    },
+    /**
+     * THE REAL HOP CEILING, and it is not JUMP_APEX.
+     *
+     * The 120Hz step integrates velocity first, so the discrete apex overshoots
+     * the continuous v^2/2g by exactly v0*dt/2 = 8.4/240 = 0.035m: 1.505m, not
+     * 1.470m, reached at step 42. Verified by running the real integrator.
+     *
+     * What actually decides whether you land ON a ledge rather than bump into
+     * it is the horizontal query's SKIN: fillHorizontalBox sets min.y = wy +
+     * 0.02, and queryAABB drops a box whose max.y is below that. So a ledge of
+     * top T goes transparent - you sail over it - exactly when T < wy + 0.02,
+     * and the largest wy a horizontal pass ever sees is the apex. Hence:
+     *
+     *     T < 1.505 + 0.02 = 1.525m
+     *
+     * A slab tops out at 1.40 (0.125 of margin), a block starts at 1.75 (0.225
+     * of margin) so no floating-point edge can ever make one hoppable off flat
+     * ground.
+     */
+    rockHopCeiling: 1.525,
+    /**
+     * Exponent of a symmetric U-shaped draw inside a class band. Below 1 pushes
+     * rolls to the ENDS, so a rock is decidedly small or decidedly big and the
+     * middling ones you cannot read at a glance are rare.
+     * P(middle third) = 3^(-1/spread) = 13.6% against a uniform 33.3%.
+     */
+    rockSizeSpread: 0.55,
+    /** Fraction of slabs that get a bush growing out of the top. */
+    hummockShare: 0.30,
+    /** Fraction of slabs that emit a deliberate block partner to climb onto. */
+    stackShare: 0.34,
     obstacleMinSize: 1.1,
     obstacleMaxSize: 4.2,
     obstacleMaxHeight: 6.0,
+    /**
+     * Trees get their own height band, separate from obstacleMaxSize, because
+     * the crown radius is now derived from the TREE's height rather than from
+     * the generic prop half-size. Sharing one key pegged every crown above
+     * ~7.5m to the same ceiling, which is what made 9.4% of trees wear an
+     * identically-clamped canopy.
+     */
+    treeHeightMin: 8.0,
+    treeHeightMax: 11.0,
     // Keeps the immediate spawn area clear so you never start inside a rock.
     spawnClearRadius: 7,
     fogNear: 26,
-    fogFar: 150,
+    /**
+     * 112, down from 150. viewChunks 3 guarantees only 96m of streamed ground
+     * (3 * 32); past that a chunk may or may not exist yet, and an 11m tree
+     * materialising at that seam is far more visible than a 6m one was. At 150
+     * the pop showed at 43.5% contrast; at 112 the fog factor at 96m is
+     * (96-26)/(112-26) = 0.814, so the same pop shows at 18.6%.
+     * Raise this ONLY together with viewChunks: fogFar <= viewChunks * chunkSize * 1.17.
+     */
+    fogFar: 112,
   },
 
   // ---------------------------------------------------------------- emeems
@@ -102,7 +182,12 @@ export const CONFIG = {
     // meant an almost empty field - two visible in a whole screenshot. 14 puts
     // roughly 80 in the streamed ring, one every ~8.5m, so there is always one
     // worth breaking your line for without them carpeting the ground.
-    perChunk: 14,          // target emeems alive per streamed chunk
+    // 18, not 14: perChunk is a DENSITY (per chunkSize^2), and the live count
+    // is that density times the ring area - which fogFar 112 shrank from
+    // PI*(45^2-12^2) = 5909 m^2 to PI*(33.6^2-12^2) = 3094 m^2. Holding 14
+    // would have left 42 emeems alive against today's 81. 18 gives 54, which
+    // keeps the SCREEN as full as it is now inside the shorter draw distance.
+    perChunk: 18,          // target emeems alive per streamed chunk
     bobHeight: 0.28,
     bobSpeed: 2.1,
     spinSpeed: 1.4,
@@ -111,6 +196,13 @@ export const CONFIG = {
     // (which stands at 0.615m) and the claw had to reach upward, which read as
     // swatting rather than pinching.
     hoverY: 0.34,
+    /**
+     * Fraction of ordinary emeems that spawn ON TOP of a prop instead of on the
+     * ground. Slabs and blocks only - a cobble carries no collider and a trunk
+     * collider runs the tree's whole 8-11m, so both are excluded for free by
+     * the perch height test rather than by a special case.
+     */
+    perchShare: 0.22,
     magnetRadius: 2.4,     // emeems drift toward you inside this radius
     magnetStrength: 7.0,
     respawnDelay: 0.6,
@@ -152,20 +244,85 @@ export const CONFIG = {
       },
       amaam: {
         points: -2,
-        radius: 0.40,
+        // 0.52, up from 0.40. The amaam no longer wears an aura, so SIZE is the
+        // whole warning and it has to carry the read on its own: 2.36x an
+        // emeem's width and 5.6x its plan area, which is unmistakable at a
+        // glance rather than merely measurable with a ruler.
+        radius: 0.52,
         weight: 0.17,
         // Deliberately larger than its own body: an amaam should feel like
         // something you have to actively steer AROUND, not something you brush.
-        pickupRadius: 1.45,
+        // Grown with the body so the margin past the visible edge is preserved
+        // (1.45 - 0.40 = 1.05 of reach beyond the rim; 1.57 - 0.52 keeps it).
+        pickupRadius: 1.57,
         glow: 5.0,
+      },
+      /**
+       * GOLDEN. Worth NOTHING on the scoreboard - it slows the Protector for six
+       * seconds instead, and taking a second one restarts that six rather than
+       * adding to it.
+       *
+       * It flashes. Every other collectible sits there and glows steadily; this
+       * one blinks, because it is the only thing in the field whose value is
+       * time-limited and situational, and you have to be able to spot one
+       * mid-chase without hunting for it.
+       */
+      golden: {
+        points: 0,
+        // Between an emeem's 0.22 and an amaam's 0.52: clearly a prize, clearly
+        // not an ordinary one, and never mistakable for the hazard.
+        radius: 0.30,
+        // Rare. Its only pull is the effect, so too common and the Protector is
+        // permanently neutered; too rare and nobody learns the mechanic exists.
+        weight: 0.055,
+        pickupRadius: 1.35,
+        glow: 11.0,
+        /** Seconds of slow, RESTARTED (not extended) by a second pickup. */
+        slowTime: 6.0,
+        /**
+         * The Protector's speed multiplier while slowed. 0.55 puts every tier
+         * below the player's 7.2 m/s - including the top tier's 9.2 - and keeps
+         * it there even when the long-range rubber band is at full stretch
+         * (9.2 * 0.55 * 1.35 = 6.83). So "you are faster than it" is a property
+         * of the numbers rather than something to re-check whenever the threat
+         * ladder is retuned.
+         */
+        slowFactor: 0.55,
       },
     },
   },
 
   // --------------------------------------------------------------- monster
   monster: {
-    spawnDistance: 34,     // metres behind the player at game start
-    minSpawnDistance: 22,
+    // Where the Protector comes from at the whistle. It used to start 34m
+    // BEHIND you - and the camera sits only 5.4m behind, so it began off-screen
+    // and then entered frame from the bottom facing away up the screen, which
+    // meant you only ever saw its back. It now arrives from a top corner,
+    // walking at you, so the first thing you see is its face.
+    spawnDistance: 30,     // metres from the player at game start
+    minSpawnDistance: 24,  // closest the obstacle sweep may place it instead
+    /**
+     * Radians off straight-ahead (-Z, up the screen), swung to a randomly
+     * chosen side each run. 0.70 rad = 40 degrees.
+     *
+     * Chosen by projecting it: the camera's horizontal half-angle is
+     * atan(tan(fov/2) * aspect) = 55.6 degrees at 1040x480 and 50.2 at the
+     * iPhone SE's 667x375. At 30m and 40 degrees the creature lands 47% of the
+     * way to the frame edge on the S25 Ultra and 57% on the SE - upper corner
+     * on every screen the suite runs, and comfortably inside the frustum on
+     * the widest one rather than clipped off the side of the narrowest.
+     */
+    spawnAngle: 0.70,
+    /**
+     * Which side it comes from: 0 rolls a coin every run, -1 or +1 forces it.
+     * Forcing exists for the test suite. A random side makes every
+     * monster-distance assertion non-deterministic - the scripted bot walks a
+     * fixed path, so whether it walks toward the Protector or away from it
+     * decides the result, and the same check passed at 18.8m and failed at
+     * 6.2m on consecutive runs of identical code. Tests pin the side; the game
+     * never does.
+     */
+    spawnSide: 0,
     catchRadius: 1.35,
     baseSpeed: 4.6,        // m/s at level 0 (slower than the player)
     turnRate: 3.2,         // rad/s steering
@@ -252,6 +409,13 @@ export const CONFIG = {
      * it is already too close to avoid.
      */
     amaams: [0x6f7a52, 0x5c6b48, 0x7d8352],
+    /**
+     * Gold, and only gold. Every other kind draws from a spread of natural
+     * tones because variety is the point; this one is a signal, so all three
+     * entries are the same metal at different temperatures. A golden emeem must
+     * never be mistaken for a lucky-coloured ordinary one.
+     */
+    goldens: [0xffd24a, 0xffc21f, 0xffe07a],
     amaamTipShade: 0.62,
     hand: 0xf6c9a8,
     handShadow: 0xd9a483,

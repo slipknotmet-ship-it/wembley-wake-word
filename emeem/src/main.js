@@ -71,9 +71,20 @@ const touch = createTouchControls(uiRoot, ctx);
 // ------------------------------------------------------------------- events
 bus.on('collect', (e) => {
   ctx.audio.collect(e);
-  // Count what you CAUGHT, not what you touched. An amaam is a penalty, not a
-  // pickup, and it must not inflate the run summary.
+  // Count what you CAUGHT, not what you touched. An amaam is a penalty and a
+  // golden is worth nothing; neither must inflate the run summary. A golden
+  // falls out for free here - its points are 0, so `points > 0` is false.
   if (!e || typeof e.points !== 'number' || e.points > 0) state.stats.emeems++;
+
+  // A golden emeem RESTARTS the slow rather than extending it: taking one with
+  // 5.9s still on the clock gives 6.0s, never 11.9s. That is the whole rule,
+  // and an assignment rather than a `+=` is the whole implementation.
+  if (e && e.kind === 'golden') {
+    const was = state.monster.slowT;
+    state.monster.slowT = CONFIG.emeem.kinds.golden.slowTime;
+    state.stats.goldens = (state.stats.goldens || 0) + 1;
+    bus.emit('slow', { seconds: state.monster.slowT, refreshed: was > 0 });
+  }
 });
 bus.on('jump', (e) => { ctx.audio.jump(e); state.stats.jumps++; });
 bus.on('land', (e) => ctx.audio.land(e));
@@ -174,4 +185,4 @@ hud.showStart();
 requestAnimationFrame(frame);
 
 // Expose a tiny handle for the automated smoke test / manual debugging.
-window.__EMEEM__ = { ctx, state, bus, startRun, engine, world: ctx.world, player, monster, emeems, touch };
+window.__EMEEM__ = { ctx, state, bus, startRun, engine, world: ctx.world, player, monster, emeems, touch, CONFIG };
