@@ -436,6 +436,10 @@ export function createHUD(uiRootEl, ctx) {
   const stateRef = (ctx && ctx.state) || null;
   const candy = (CONFIG.palette && CONFIG.palette.emeems) || FALLBACK_CANDY;
 
+  /** Wall clock, with a fallback for harnesses that have no performance. */
+  const now = () => (typeof performance !== 'undefined' && performance.now
+    ? performance.now() : Date.now());
+
   let reduceMotion = false;
   try {
     reduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
@@ -695,10 +699,9 @@ export function createHUD(uiRootEl, ctx) {
    * @param {number} score
    * @param {number} best
    * @param {number} [delaySec] seconds to hold the card back. The death camera
-   *   needs the screen to itself for its swing, and a scrim over that shot is
-   *   the same as not having taken it. Counted down in update() rather than on
-   *   a setTimeout, so it runs on the frame clock and a backgrounded tab cannot
-   *   fire it into the middle of the next run.
+   *   needs the screen to itself, and a scrim over that shot is the same as not
+   *   having taken it. Checked from update() rather than on a setTimeout, so it
+   *   cannot fire into the middle of the next run.
    */
   function showGameOver(score, best, delaySec) {
     const s = Number.isFinite(score) ? score | 0 : 0;
@@ -714,15 +717,15 @@ export function createHUD(uiRootEl, ctx) {
     startOv.classList.add('emhud-off');
     const wait = Number.isFinite(delaySec) && delaySec > 0 ? delaySec : 0;
     if (wait > 0 && !reduceMotion) {
-      overPending = wait;
+      overAt = now() + wait * 1000;
     } else {
-      overPending = 0;
+      overAt = 0;
       overOv.classList.remove('emhud-off');
     }
   }
 
   function hideOverlays() {
-    overPending = 0;
+    overAt = 0;
     startOv.classList.add('emhud-off');
     overOv.classList.add('emhud-off');
     // Clear a banner left over from the previous run.
@@ -737,8 +740,18 @@ export function createHUD(uiRootEl, ctx) {
 
   // ------------------------------------------------------------- update ---
   // Portrait/bearing memos, so the DOM is only touched when a value moves.
-  /** Seconds left before the game-over card is allowed on screen. */
-  let overPending = 0;
+  /**
+   * Wall-clock time the game-over card is allowed on screen, or 0 for "now".
+   *
+   * A WALL CLOCK, not the accumulated dt. main.js clamps dt to render.maxDelta
+   * (0.05s) so a hitch cannot tunnel the physics, which means at 4fps the world
+   * advances at a fifth of real time - and a three-second hold counted in that
+   * currency took fifteen real seconds under software rasterisation. Physics
+   * wants the clamp; a UI beat wants the clock on the wall. It is still checked
+   * from update(), so a backgrounded tab reveals the card on its first frame
+   * back rather than while nothing is being drawn.
+   */
+  let overAt = 0;
   let prevBearing = 1e9;
   let prevDist = -1;
   let prevProx = -1;
@@ -748,15 +761,12 @@ export function createHUD(uiRootEl, ctx) {
     const s = (c && c.state) || stateRef;
 
     // The held-back game-over card. Guarded on the phase as well as the clock:
-    // tapping RUN AGAIN during the hold clears overPending via hideOverlays,
+    // tapping RUN AGAIN during the hold clears overAt via hideOverlays,
     // but the guard means even a missed clear cannot drop a death card over a
     // live run.
-    if (overPending > 0) {
-      overPending -= Number.isFinite(dt) && dt > 0 ? dt : 0;
-      if (overPending <= 0) {
-        overPending = 0;
-        if (!s || s.phase !== 'playing') overOv.classList.remove('emhud-off');
-      }
+    if (overAt > 0 && now() >= overAt) {
+      overAt = 0;
+      if (!s || s.phase !== 'playing') overOv.classList.remove('emhud-off');
     }
     if (!s) return;
     const step = Number.isFinite(dt) ? Math.min(Math.max(dt, 0), 0.1) : 0;

@@ -34,16 +34,41 @@ export const BIOME_COUNT = 4;
 
 export const BIOME_NAMES = ['forest', 'mountain', 'beach', 'city'];
 
-/** Metres of pure forest before the first transition begins. */
-const LEAD = 192;
-/** Metres per biome band. */
-const BAND = 256;
+/**
+ * THE BAND GEOGRAPHY, AND WHY IT IS THIS SIZE.
+ *
+ * The first cut was LEAD 192 / BAND 256, which put the mountain's centre 576m
+ * out and the city's 1088m. Then somebody measured how far a run actually gets.
+ * A bot that flees up-screen AND diverts for prizes - so that it scores, climbs
+ * the threat ladder and eventually dies, which is what a player does - covered
+ * a median of 40m and a best of 130m over five runs, dying between 3 and 39
+ * seconds in. At that geography three of the four biomes were unreachable: four
+ * biomes built, one ever played.
+ *
+ * So the bands are a quarter of the size. The mountain takes over at 128m, the
+ * beach at 192m and the city at 256m, and the cycle repeats every 256m. The
+ * median run still spends its whole life in the forest, which is right - that
+ * is the home ground - but a good one now crosses two or three biomes.
+ *
+ * BAND IS NOT A FREE PARAMETER. Lakes recur every LAKE_PERIOD (1024m), and a
+ * lake keeps the same biome only if BIOME_COUNT * BAND divides that. 4 * 64 is
+ * 256 and 1024 is 4 * 256, so every lake lands at the same phase forever. A
+ * "nicer" 96 would put lakes in a different biome each time.
+ */
+const LEAD = 64;
+/** Metres per biome band. See above: 4 * BAND must divide LAKE_PERIOD. */
+const BAND = 64;
 /**
  * Metres of cross-fade, centred on each boundary. A chunk is 32m, so this is
- * 8 chunks of blend: one chunk line moves the mix by 0.25, not by a visible
- * step. A 40m blend would move it 0.80 in a single chunk line - a wall.
+ * one chunk row of mixed obstacle species - and that would be a wall if the
+ * species were the only thing that changed. It is not: the ground tint is
+ * per-fragment and the scatter tint per-position, so both cross the boundary
+ * continuously, and the chunk row that does flip is dithered by weight rather
+ * than switched. Half the band is deliberate; at BAND 64 there is not room for
+ * both a long blend and a long pure stretch, and a soft edge matters more here
+ * than another few metres of unmixed ground.
  */
-const BLEND = 128;
+const BLEND = 32;
 /** Blend half-width, in band units. */
 const HALF = BLEND / (2 * BAND);
 /** Full blend span in band units, so the ramps below are a simple divide. */
@@ -94,6 +119,13 @@ export function biomeAt(x, z, scratch) {
 }
 
 export const BIOME_LEAD = LEAD;
+/**
+ * The boundary warp, exported so the ground shader can compute the SAME band
+ * coordinate this file does. Two copies of a number that must agree is how a
+ * ground tint ends up a metre out of step with the props standing on it.
+ */
+export const BIOME_WARP_A = WARP_A;
+export const BIOME_WARP_K = WARP_K;
 export const BIOME_BAND = BAND;
 export const BIOME_BLEND = BLEND;
 

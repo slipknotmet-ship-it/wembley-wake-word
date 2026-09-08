@@ -76,10 +76,14 @@ const touch = createTouchControls(uiRoot, ctx);
 
 /**
  * Seconds the death camera gets to itself before the game-over card lands.
- * Long enough for the swing to arrive and read (DEATH_LERP 3.2 puts it at 91%
- * by 0.7s), short enough that nobody sits waiting to tap RUN AGAIN.
+ *
+ * The swing itself is done inside a second (DEATH_LERP 3.2 is 91% by 0.7s), so
+ * this is not the move - it is the beat after it, where the thing that just
+ * caught you is on screen and nothing else is. Asked for at three seconds, and
+ * three is right: the card is what ends the moment, so putting it up early is
+ * the same as not taking the shot.
  */
-const DEATH_CAM_SECONDS = 1.25;
+const DEATH_CAM_SECONDS = 3.0;
 
 // ------------------------------------------------------------------- events
 bus.on('collect', (e) => {

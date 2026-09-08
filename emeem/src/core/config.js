@@ -430,9 +430,61 @@ export const CONFIG = {
     skyDread: 0x1a0508,
     fogCalm: 0xbfe0ff,
     fogDread: 0x2a0409,
-    // Forest floor: leaf litter and moss, not lawn.
+    // Forest floor: leaf litter and moss, not lawn. This pair is also the BASE
+    // the per-biome grounds below are expressed as ratios of, so moving it
+    // moves the whole world.
     groundCalm: 0x4a6b3f,
     groundDread: 0x2a1c22,
+    /**
+     * THE FOUR GROUNDS, indexed by biome (forest, mountain, beach, city).
+     *
+     * The ground is ONE plane that follows the player and spans several bands
+     * at once, so its colour cannot be a material property - it is computed per
+     * fragment in the injected grid shader. What the CPU hands the shader is a
+     * RATIO against the forest ground at the current dread, which is why the
+     * forest entry is exactly the forest pair: its ratio is 1, an exact no-op,
+     * so nothing about the shipped forest changes by a single bit.
+     *
+     * Expressing them as ratios rather than absolute colours also keeps the
+     * whole calm-to-dread lerp in ONE place (applyDread, where the base
+     * material colour already does it) instead of duplicating the ramp into
+     * GLSL, where it would immediately drift from hemi.groundColor.
+     */
+    biomes: [
+      {
+        // FOREST - the base. The ground pair must equal groundCalm/groundDread
+        // exactly, so its ratio is 1 and the shipped forest is untouched.
+        groundCalm: 0x4a6b3f, groundDread: 0x2a1c22,
+        skyCalm: 0x8ec5ff, skyDread: 0x1a0508,
+        fogCalm: 0xbfe0ff, fogDread: 0x2a0409,
+        sunCalm: 0xfff4d6, sunDread: 0xff5a3c,
+      },
+      {
+        // MOUNTAIN - dry scree and lichen. Thin cold air: the sky loses its
+        // warmth and the haze goes white rather than blue.
+        groundCalm: 0x6e6a5e, groundDread: 0x332a2f,
+        skyCalm: 0xa8c8e8, skyDread: 0x140611,
+        fogCalm: 0xd6e4ee, fogDread: 0x24060f,
+        sunCalm: 0xffeedd, sunDread: 0xff6a44,
+      },
+      {
+        // BEACH - pale damp sand, and the loudest ground of the four on
+        // purpose: it is the one biome whose ground IS the whole read. Hot
+        // sand-coloured haze, so the horizon goes gold instead of blue.
+        groundCalm: 0xc9b48c, groundDread: 0x5c4638,
+        skyCalm: 0x7fc6e8, skyDread: 0x1b0709,
+        fogCalm: 0xe8dfc0, fogDread: 0x33110c,
+        sunCalm: 0xfff0c0, sunDread: 0xff7a3a,
+      },
+      {
+        // CITY - asphalt, slightly blue so it reads as made rather than dug.
+        // Smog: the sky desaturates toward grey and the sun goes wan.
+        groundCalm: 0x5b5a62, groundDread: 0x2b2632,
+        skyCalm: 0x9fb0bd, skyDread: 0x120810,
+        fogCalm: 0xc8ccd0, fogDread: 0x201820,
+        sunCalm: 0xffe8c8, sunDread: 0xff5030,
+      },
+    ],
     // Bark.
     obstacleCalm: 0x6b5240,
     obstacleDread: 0x3a2830,
