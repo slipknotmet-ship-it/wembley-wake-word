@@ -60,6 +60,10 @@ export const state = {
     // monster.js. Present here so it exists before the first roll - a test
     // reading it on the start card must not see undefined.
     entranceSide: 1,
+    /** 0 on land, 1 in open water. Written by monster.js's physics step and
+     *  read by its visual step, so the swim POSE and the swim SLOW are the
+     *  same number and cannot drift apart. */
+    wet: 0,
     /**
      * Seconds of golden-emeem slow remaining. RESTARTED by a second pickup, not
      * extended: taking one with 5.9s left gives 6.0s, never 11.9s.
@@ -117,6 +121,7 @@ export function resetState() {
   state.monster.distanceToPlayer = CONFIG.monster.spawnDistance;
   state.monster.entranceSide = 1;
   state.monster.slowT = 0;
+  state.monster.wet = 0;
   state.monster.proximity = 0;
 
   state.input.x = 0;

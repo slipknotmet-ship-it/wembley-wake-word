@@ -74,6 +74,13 @@ ctx.boats = boats;
 const hud = createHUD(uiRoot, ctx);
 const touch = createTouchControls(uiRoot, ctx);
 
+/**
+ * Seconds the death camera gets to itself before the game-over card lands.
+ * Long enough for the swing to arrive and read (DEATH_LERP 3.2 puts it at 91%
+ * by 0.7s), short enough that nobody sits waiting to tap RUN AGAIN.
+ */
+const DEATH_CAM_SECONDS = 1.25;
+
 // ------------------------------------------------------------------- events
 bus.on('collect', (e) => {
   ctx.audio.collect(e);
@@ -105,7 +112,11 @@ bus.on('caught', () => {
   try { localStorage.setItem('emeem.best', String(state.best)); } catch { /* private mode */ }
   ctx.audio.caught();
   bus.emit('shake', { amount: 1.6 });
-  hud.showGameOver(state.score, state.best);
+  // Swing the camera onto the kill, and hold the card back until it lands.
+  // The whole point of the shot is the face, and a full-screen scrim over it
+  // is the same as not having taken it.
+  engine.deathCamera();
+  hud.showGameOver(state.score, state.best, DEATH_CAM_SECONDS);
 });
 
 function startRun() {

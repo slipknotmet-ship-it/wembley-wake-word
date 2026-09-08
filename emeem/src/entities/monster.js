@@ -109,7 +109,7 @@ const RUBBER_MAX = 1.35;
 /** Speed multiplier while swimming. See the derivation at its use site. */
 const SWIM_FACTOR = (() => {
   const v = CONFIG.world && CONFIG.world.swimFactor;
-  return Number.isFinite(v) ? v : 0.72;
+  return Number.isFinite(v) ? v : 0.55;
 })();
 
 /** Speed multiplier while a golden emeem's slow is running. */
@@ -579,9 +579,19 @@ export function createMonster(ctx) {
     // 0.777, and the design's original 0.82 would have made it FASTER in the
     // lake than out of it at the top two tiers - the exact inverse of a lake.
     //
-    // 0.72 sits 0.057 under that ceiling, and stays above the wader at every
-    // tier (3.31 vs 2.88 at Watching, 6.62 vs 2.88 at THE END).
+    // There is a FLOOR too: it has to catch a wader at every tier, or water is
+    // a free escape and the canoe is decoration. At walkSpeed 7.2 and
+    // waterSpeedMul 0.25 a wader makes 1.80 m/s, so f > 1.80/4.6 = 0.391.
+    //
+    // 0.72 sat right under the ceiling, which satisfied the rule and, in play,
+    // did not read as a slow at all. 0.55 sits near the middle of the window:
+    // 2.53 m/s at Watching against 4.6 on land, 5.06 at THE END against 9.2,
+    // and still 1.4x a wader at the gentlest tier.
     const wet = (world && world.waterAt) ? world.waterAt(m.pos.x, m.pos.z) : 0;
+    // The visual pass poses the rig from this rather than sampling the field a
+    // second time, so what you SEE swimming and what is actually slowed can
+    // never disagree.
+    m.wet = wet;
     const swimF = 1 - wet * (1 - SWIM_FACTOR);
 
     // --- golden emeem: the slow.
@@ -809,7 +819,12 @@ export function createMonster(ctx) {
 
     face.setAnger(anger);
     face.setMouthOpen(mawOpen);
-    face.update(step, { anger, proximity: prox, speed: animSpeed, time: clock });
+    face.update(step, {
+      anger, proximity: prox, speed: animSpeed, time: clock,
+      // Deep water only. The shallows are a wade, and a creature doing an
+      // overarm stroke through ankle-deep water is a comedy, not a threat.
+      swim: m.wet > 0.55 ? 1 : 0,
+    });
   }
 
   /** Fresh run: back behind the player, back to base speed and size. */

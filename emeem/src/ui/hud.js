@@ -691,7 +691,16 @@ export function createHUD(uiRootEl, ctx) {
     startOv.classList.remove('emhud-off');
   }
 
-  function showGameOver(score, best) {
+  /**
+   * @param {number} score
+   * @param {number} best
+   * @param {number} [delaySec] seconds to hold the card back. The death camera
+   *   needs the screen to itself for its swing, and a scrim over that shot is
+   *   the same as not having taken it. Counted down in update() rather than on
+   *   a setTimeout, so it runs on the frame clock and a backgrounded tab cannot
+   *   fire it into the middle of the next run.
+   */
+  function showGameOver(score, best, delaySec) {
     const s = Number.isFinite(score) ? score | 0 : 0;
     const b = Number.isFinite(best) ? best | 0 : 0;
     runVal.textContent = String(s);
@@ -703,10 +712,17 @@ export function createHUD(uiRootEl, ctx) {
     // up); without this the banner ghosts through the card's scrim.
     bannerT = 0;
     startOv.classList.add('emhud-off');
-    overOv.classList.remove('emhud-off');
+    const wait = Number.isFinite(delaySec) && delaySec > 0 ? delaySec : 0;
+    if (wait > 0 && !reduceMotion) {
+      overPending = wait;
+    } else {
+      overPending = 0;
+      overOv.classList.remove('emhud-off');
+    }
   }
 
   function hideOverlays() {
+    overPending = 0;
     startOv.classList.add('emhud-off');
     overOv.classList.add('emhud-off');
     // Clear a banner left over from the previous run.
@@ -721,6 +737,8 @@ export function createHUD(uiRootEl, ctx) {
 
   // ------------------------------------------------------------- update ---
   // Portrait/bearing memos, so the DOM is only touched when a value moves.
+  /** Seconds left before the game-over card is allowed on screen. */
+  let overPending = 0;
   let prevBearing = 1e9;
   let prevDist = -1;
   let prevProx = -1;
@@ -728,6 +746,18 @@ export function createHUD(uiRootEl, ctx) {
 
   function update(dt, c) {
     const s = (c && c.state) || stateRef;
+
+    // The held-back game-over card. Guarded on the phase as well as the clock:
+    // tapping RUN AGAIN during the hold clears overPending via hideOverlays,
+    // but the guard means even a missed clear cannot drop a death card over a
+    // live run.
+    if (overPending > 0) {
+      overPending -= Number.isFinite(dt) && dt > 0 ? dt : 0;
+      if (overPending <= 0) {
+        overPending = 0;
+        if (!s || s.phase !== 'playing') overOv.classList.remove('emhud-off');
+      }
+    }
     if (!s) return;
     const step = Number.isFinite(dt) ? Math.min(Math.max(dt, 0), 0.1) : 0;
 
