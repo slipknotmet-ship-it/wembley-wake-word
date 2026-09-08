@@ -150,7 +150,7 @@ export function createPlayer(ctx) {
   const bus = ctx.bus;
   const P = CONFIG.player;
   const WATER_SPEED_MUL = Number.isFinite(CONFIG.world.waterSpeedMul)
-    ? CONFIG.world.waterSpeedMul : 0.40;
+    ? CONFIG.world.waterSpeedMul : 0.25;
   const R = P.radius;
   const H = P.height;
 
@@ -400,10 +400,11 @@ export function createPlayer(ctx) {
       // pose, no vertical anything. The ground never moves, so the hand simply
       // walks along the bottom, slowly, with the surface across its wrists.
       //
-      // It is meant to be lethal. At waterSpeedMul 0.40 a wader makes 2.88 m/s
-      // against a Protector swimming at 3.31 m/s even at the lowest tier, so
-      // walking in is a decision to be caught unless you have the boat. That is
-      // what makes the boat worth finding.
+      // It is meant to be lethal. At waterSpeedMul 0.25 a wader makes 1.80 m/s
+      // against a Protector swimming at 3.31 m/s even at the LOWEST tier and
+      // 6.62 at the top, so walking into deep water is a decision to be caught.
+      // That is what makes the canoe worth finding. The slow scales with depth,
+      // so the shallows you cross to reach a mooring cost almost nothing.
       // CONFIG.world, not CONFIG.player - wetness is a property of the world,
       // and reading it off the wrong block returned undefined, which made
       // `1 - wet * (1 - undefined)` evaluate to NaN even on dry land, because

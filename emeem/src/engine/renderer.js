@@ -172,6 +172,31 @@ export function createRenderer(canvasEl) {
   );
   scene.add(camera);
 
+  /**
+   * THE DEATH CAMERA.
+   *
+   * The chase camera never rotates - that is the single rule the whole game is
+   * framed around, and it is why you can read the world at speed. But the one
+   * moment it costs you something is the moment you are caught: the creature is
+   * on top of you, filling the frame from behind, and the face that has been
+   * building all run is the one thing you cannot see.
+   *
+   * So the fixed heading is abandoned exactly once, after the run is over, when
+   * there is nothing left to read. The camera swings to the far side of the
+   * hand and looks back along the line the creature came in on, which puts the
+   * hand in the foreground and the face over it.
+   *
+   * It is armed by main.js on 'caught' and cleared by reset(), so it can never
+   * be running during play.
+   */
+  const DEATH_DIST = 6.0;      // metres back from the hand, along the kill line
+  const DEATH_HEIGHT = 2.4;    // metres up. Low enough to look UP at the face.
+  const DEATH_LERP = 3.2;      // deliberate, not a snap
+  /** Rig-local height of the face, so the aim tracks the creature's growth. */
+  const FACE_Y = 2.75;
+  let deathCam = false;
+  const _kill = new THREE.Vector3();
+
   // Camera state kept outside camera.position so shake can be layered on top
   // without feeding back into the smoothing.
   const camBase = new THREE.Vector3();
@@ -380,9 +405,35 @@ export function createRenderer(canvasEl) {
       pp.z - CONFIG.camera.lookAhead,
     );
 
+    // 3b. ...unless the run just ended, in which case go and look at it.
+    let lerpRate = 0;
+    if (deathCam && S.monster && S.monster.pos) {
+      const mp = S.monster.pos;
+      let ux = mp.x - pp.x;
+      let uz = mp.z - pp.z;
+      const len = Math.hypot(ux, uz);
+      if (len > 0.05) { ux /= len; uz /= len; }
+      // Caught dead-centre, there is no line to swing along. Fall back to the
+      // heading the chase camera already has, which at least keeps the move
+      // small instead of throwing the camera at a random azimuth.
+      else { ux = 0; uz = 1; }
+
+      // Behind the hand, looking back down the line the creature came in on.
+      _desiredPos.set(pp.x - ux * DEATH_DIST, pp.y + DEATH_HEIGHT, pp.z - uz * DEATH_DIST);
+
+      // Aim halfway between the top of the hand and the creature's face, so
+      // both are in frame however big it has grown - at 2.1x the face is 5.8m
+      // up and a shot centred on it would leave the hand off the bottom.
+      const scl = (S.monster.scale) || 1;
+      const faceY = mp.y + FACE_Y * scl;
+      _kill.set((pp.x + mp.x) * 0.5, (pp.y + 0.5 + faceY) * 0.5, (pp.z + mp.z) * 0.5);
+      _desiredLook.copy(_kill);
+      lerpRate = DEATH_LERP;
+    }
+
     if (step > 0) {
-      const posA = 1 - Math.exp(-CONFIG.camera.followLerp * step);
-      const lookA = 1 - Math.exp(-CONFIG.camera.lookLerp * step);
+      const posA = 1 - Math.exp(-(lerpRate || CONFIG.camera.followLerp) * step);
+      const lookA = 1 - Math.exp(-(lerpRate || CONFIG.camera.lookLerp) * step);
       camBase.lerp(_desiredPos, posA);
       lookTarget.lerp(_desiredLook, lookA);
     }
@@ -520,7 +571,11 @@ export function createRenderer(canvasEl) {
     const yaw = rig.rotation ? rig.rotation.y : 0;
     // Its face is on its chest, so aim at chest height and stand in FRONT of
     // it - the creature faces -Z in its own frame, rotated by its yaw.
-    _pSubject.y += portraitSubject.height * scl;
+    // A subject can sink below its own origin - the Protector drops into the
+    // water without its root moving - and the portrait has no way to see that
+    // from a world matrix one node too high. It publishes the drop instead.
+    const drop = (s.userData && s.userData.portraitDrop) || 0;
+    _pSubject.y += (portraitSubject.height - drop) * scl;
     const dist = portraitSubject.dist * scl;
     // Stand three-quarters rather than dead-on, biased toward the side the sun
     // comes from. Straight in front of its face is straight into its shadow -
@@ -626,6 +681,7 @@ export function createRenderer(canvasEl) {
   function reset() {
     lastDread = -1;
     setDread(0);
+    deathCam = false;
 
     currentFov = CONFIG.camera.fov;
     appliedFov = CONFIG.camera.fov;
@@ -648,6 +704,14 @@ export function createRenderer(canvasEl) {
   return {
     renderer, scene, camera, sun, hemi, resize, render, reset, update, setDread,
     setPortraitSubject, setPortraitRect, PORTRAIT_LAYER,
+    /**
+     * Abandon the fixed heading and swing round onto the kill. Armed by
+     * main.js on 'caught' and cleared by reset(), so it is structurally
+     * impossible for it to be running while the game is playable.
+     */
+    deathCamera: () => { deathCam = true; },
+    /** For the suites: is the camera off its fixed heading right now? */
+    isDeathCamera: () => deathCam,
     /** Main-pass draw stats. See the comment on `gpu` above before trusting
      *  renderer.info directly - it holds the portrait's numbers, not these. */
     gpu,

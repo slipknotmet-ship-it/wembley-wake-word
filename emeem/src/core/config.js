@@ -158,22 +158,45 @@ export const CONFIG = {
     // Keeps the immediate spawn area clear so you never start inside a rock.
     spawnClearRadius: 7,
     /**
-     * Fraction of walking speed kept while wading. 0.40 -> 2.88 m/s.
+     * Fraction of walking speed kept while wading. 0.25 -> 1.80 m/s.
      *
-     * Pinned by the swim multiplier, not chosen freely. The Protector must
-     * catch a wader at EVERY tier or water is a free escape and the boat is
-     * decoration: at the lowest tier it swims 4.6 * 0.72 = 3.31 m/s, so the
-     * wader has to be slower than that. 0.45 (3.24 m/s) left only 0.07 m/s of
-     * margin; 0.40 leaves 0.43.
+     * The floor is pinned by the swim multiplier: the Protector must catch a
+     * wader at EVERY tier, or water is a free escape and the canoe is
+     * decoration. At the lowest tier it swims 4.6 * 0.72 = 3.31 m/s, so a wader
+     * has to be slower than that. 0.45 (3.24 m/s) left 0.07 m/s of margin and
+     * 0.40 (2.88) left 0.43 - enough to satisfy the rule and, in play, not
+     * enough to FEEL it. At 0.40 the lake was survivable on foot at the bottom
+     * two tiers: 23s of wading, and you came out 11.6m ahead.
+     *
+     * 0.25 makes deep water a place you do not go without a boat at any tier -
+     * the Protector swims between 1.8x and 3.7x a wader's pace, so a crossing
+     * on foot is not a slow escape, it is a death. The shallows are barely
+     * touched (the slow scales with depth, and a mooring sits at 0.2 wet, which
+     * is 6.2 m/s), so walking the shore to reach a canoe stays quick. That is
+     * the decision the lake is meant to pose: find a boat, or go around.
      */
-    waterSpeedMul: 0.40,
+    waterSpeedMul: 0.25,
     /**
-     * The Protector's speed multiplier while swimming. See the long derivation
-     * at its use site in monster.js - the short version is that open water has
-     * no obstacles to brake it, so the honest ceiling is 1 - 0.45p where p is
-     * the measured braking duty cycle, and p reaches 0.495 at THE END.
+     * The Protector's speed multiplier while swimming.
+     *
+     * Bounded from ABOVE and BELOW, and both bounds are real.
+     *
+     * The ceiling is 1 - 0.45p. Open water has no obstacles, so the creature
+     * runs a clean line there while on land it is braked to obstacleSlowdown
+     * (0.55) for a measured fraction p of the time - 0.049 at Watching rising
+     * to 0.495 at THE END. Anything above 0.777 would make it FASTER in the
+     * water than out of it at the top tiers, which is the opposite of the rule.
+     *
+     * The floor is the wader. It has to catch someone on foot at every tier or
+     * water is a free escape and the canoe is decoration: 4.6 * f > 1.80 gives
+     * f > 0.391.
+     *
+     * 0.72 sat right under the ceiling, so the water barely slowed it. 0.55 is
+     * near the middle of (0.391, 0.777): it swims at 2.53 m/s at Watching and
+     * 5.06 at THE END, visibly labouring against its own land speed, and still
+     * 1.4x a wader at the gentlest tier.
      */
-    swimFactor: 0.72,
+    swimFactor: 0.55,
     /**
      * THE BOAT.
      *

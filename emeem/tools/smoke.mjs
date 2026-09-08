@@ -237,13 +237,40 @@ check('dread rises', escalated.dread > 0.3, escalated.dread.toFixed(2));
 await page.screenshot({ path: `${SHOTS}/03-escalated.png` });
 
 await page.evaluate(() => window.__EMEEM__.bus.emit('caught', { score: window.__EMEEM__.state.score }));
-await sleep(700);
-const dead = await page.evaluate(() => ({
+// The card is deliberately held back so the death camera - which abandons the
+// fixed heading and swings round onto the creature's face - gets the screen to
+// itself. Check the shot is actually running BEFORE the card, then wait it out:
+// asserting the overlay at 700ms would fail, and "fixing" that by not holding
+// the card would silently delete the shot.
+//
+// Ask whether the card is VISIBLE, not whether its text is in the DOM.
+// document.body.innerText still returns text inside a visibility:hidden
+// subtree, and the game-over overlay is always mounted and merely hidden - so
+// an innerText probe reads true on the title screen, before a run has even
+// started. It cannot tell a shown card from a hidden one, which is the only
+// thing being asked here.
+const cardShown = () => page.evaluate(() => {
+  const ov = document.querySelector('.emhud-ov:not(.emhud-off)');
+  if (!ov) return false;
+  return /run again/i.test(ov.innerText) && getComputedStyle(ov).visibility === 'visible';
+});
+
+await sleep(400);
+const dying = await page.evaluate(() => ({
   phase: window.__EMEEM__.state.phase,
-  overlay: !!document.body.innerText.match(/caught|again/i),
+  deathCam: window.__EMEEM__.engine.isDeathCamera(),
 }));
-check('getting caught ends the run', dead.phase === 'dead', dead.phase);
-check('game over screen shows', dead.overlay);
+dying.overlayYet = await cardShown();
+check('getting caught ends the run', dying.phase === 'dead', dying.phase);
+check('the death camera takes over', dying.deathCam === true, String(dying.deathCam));
+check('and the card does not cover the shot', dying.overlayYet === false,
+  dying.overlayYet ? 'card already up at 0.4s' : 'held back');
+
+await page.waitForFunction(() => {
+  const ov = document.querySelector('.emhud-ov:not(.emhud-off)');
+  return !!ov && /run again/i.test(ov.innerText);
+}, null, { timeout: 12000 }).catch(() => {});
+check('game over screen shows once the shot has landed', await cardShown());
 await page.screenshot({ path: `${SHOTS}/04-gameover.png` });
 
 // Restart has to fully reset, otherwise run 2 inherits run 1's monster.

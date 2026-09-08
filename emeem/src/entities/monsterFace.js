@@ -215,6 +215,28 @@ const MORPH_MAW = 1;
 const LEAN_IDLE = 0.045;    // radians of forward hip lean when calm
 const LEAN_ANGER = 0.240;   // extra lean at full anger: a stalking hunch
 const BOB_HEIGHT = 0.085;   // hip drop per footfall
+
+/**
+ * SWIMMING.
+ *
+ * How far the whole rig drops when it is fully in the water. The world is flat
+ * and its ground plane is opaque, so anything below the feet line is simply
+ * occluded - which is exactly the effect wanted: the legs disappear under the
+ * surface and the torso stays above it, for free, with no clipping plane and no
+ * second material.
+ *
+ * 1.20 of a 3.40m rig puts the waterline just under the hips (1.40). It is in
+ * rig-local metres, so it scales with the creature: at THE END's 2.1x it sinks
+ * 2.52m and the hips still ride 0.42m clear.
+ *
+ * It swims UPRIGHT and hauling, not prone. There is no head on this thing - the
+ * face IS the torso - so a front-crawl would put the one part of it the player
+ * needs to read face-down in the lake.
+ */
+const SWIM_SINK = 1.20;
+/** Strokes per second at rest, and how much the pace adds. */
+const SWIM_RATE = 0.62;
+const SWIM_RATE_PER_SPEED = 0.30;
 const STRIDE_LENGTH = 1.35; // metres of ground per stride, sets the cadence
 const BROW_TILT = 0.340;    // radians the lenses rotate into a scowl (~19 deg)
 
@@ -1236,6 +1258,9 @@ export function buildFace(T = THREE_NS, C = DEFAULT_CONFIG) {
    * @param {number} dt seconds
    * @param {object} opts { anger, proximity, speed, time }
    */
+  let swimAmt = 0;    // eased 0..1, so entering the water is not a snap
+  let swimPhase = 0;
+
   function update(dt, opts) {
     const o = opts || EMPTY_OPTS;
     const step = dt > 0 ? (dt < 0.1 ? dt : 0.1) : 0;
@@ -1311,6 +1336,52 @@ export function buildFace(T = THREE_NS, C = DEFAULT_CONFIG) {
     armR.shoulder.position.y = armL.shoulder.position.y;
     armL.shoulder.position.z = -0.02 - 0.05 * anger;
     armR.shoulder.position.z = armL.shoulder.position.z;
+
+    // ------------------------------------------------------------- swim
+    // Layered OVER the finished land pose rather than branching around it, so
+    // at swim 0 every line below is an identity and the walk is untouched, and
+    // a creature half in the shallows is genuinely half way between the two.
+    swimAmt = damp(swimAmt, clamp01(typeof o.swim === 'number' ? o.swim : 0), 5, step);
+    group.userData.portraitDrop = 0;
+    if (swimAmt > 0.001) {
+      const k = swimAmt;
+      swimPhase += TAU * (SWIM_RATE + gaitSpeed * SWIM_RATE_PER_SPEED) * step;
+      if (swimPhase > TAU) swimPhase -= TAU * Math.floor(swimPhase / TAU);
+      const sw = Math.sin(swimPhase);
+      const sw2 = Math.sin(swimPhase * 1.7);   // legs kick off-cadence from the arms
+
+      // Sink, and lose the footfall bob: there are no footfalls out here.
+      rig.position.y = lerp(rig.position.y, -SWIM_SINK, k);
+      // Published for the portrait camera, which frames off THIS group and so
+      // cannot see a drop that happens one node below it. Without this the
+      // portrait keeps aiming at where the chest used to be and shows a black
+      // rectangle with a shoulder in the corner.
+      group.userData.portraitDrop = -rig.position.y;
+      rig.rotation.z = lerp(rig.rotation.z, sw * 0.12, k);
+
+      // A big overarm haul, the two arms half a cycle apart. The stroke is
+      // mostly rotation.x - forward, down, back - with the shoulder opening out
+      // on the recovery so the arm clears the water instead of through it.
+      const haulL = -1.35 + sw * 1.30;
+      const haulR = -1.35 - sw * 1.30;
+      armL.shoulder.rotation.x = lerp(armL.shoulder.rotation.x, haulL, k);
+      armR.shoulder.rotation.x = lerp(armR.shoulder.rotation.x, haulR, k);
+      armL.shoulder.rotation.z = lerp(armL.shoulder.rotation.z, -(0.50 + 0.30 * Math.max(0, sw)), k);
+      armR.shoulder.rotation.z = lerp(armR.shoulder.rotation.z, (0.50 + 0.30 * Math.max(0, -sw)), k);
+      armL.elbow.rotation.x = lerp(armL.elbow.rotation.x, -0.30 - Math.max(0, -sw) * 0.55, k);
+      armR.elbow.rotation.x = lerp(armR.elbow.rotation.x, -0.30 - Math.max(0, sw) * 0.55, k);
+
+      // A slow flutter underneath. Most of it is below the waterline and unseen,
+      // but the part that breaks the surface is what says the legs are working.
+      legL.hip.rotation.x = lerp(legL.hip.rotation.x, sw2 * 0.26, k);
+      legR.hip.rotation.x = lerp(legR.hip.rotation.x, -sw2 * 0.26, k);
+      legL.knee.rotation.x = lerp(legL.knee.rotation.x, -0.22 - Math.max(0, -sw2) * 0.30, k);
+      legR.knee.rotation.x = lerp(legR.knee.rotation.x, -0.22 - Math.max(0, sw2) * 0.30, k);
+
+      // Leaning into the water, and rolling with the stroke.
+      torso.rotation.x = lerp(torso.rotation.x, -(LEAN_IDLE + 0.34 + LEAN_ANGER * anger), k);
+      torso.rotation.z = lerp(torso.rotation.z, -sw * 0.15, k);
+    }
 
     applyExpression();
   }

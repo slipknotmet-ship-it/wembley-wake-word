@@ -87,16 +87,23 @@ const waded = await page.evaluate(() => {
   const s = window.__EMEEM__.state;
   const v = Math.hypot(s.player.vel.x, s.player.vel.z);
   s.input.z = 0;
-  return { wet: +s.player.wet.toFixed(2), speed: +v.toFixed(2), walk: window.__EMEEM__.ctx.CONFIG.player.walkSpeed };
+  return { wet: +s.player.wet.toFixed(2), speed: +v.toFixed(2),
+           walk: window.__EMEEM__.ctx.CONFIG.player.walkSpeed,
+           mul: window.__EMEEM__.ctx.CONFIG.world.waterSpeedMul };
 });
 ok('the player is wet in open water', waded.wet === 1, `wet = ${waded.wet}`);
-ok('wading is much slower than walking', waded.speed < waded.walk * 0.55,
-  `${waded.speed} m/s vs ${waded.walk} walking`);
+// The bound comes from CONFIG, not from a number retyped here: a retune that
+// made wading fast again would otherwise still pass this line. The 1.06 is
+// slack for the velocity damping, nothing more.
+ok('wading is a fraction of walking', waded.speed < waded.walk * waded.mul * 1.06,
+  `${waded.speed} m/s vs ${waded.walk} walking (waterSpeedMul ${waded.mul})`);
+ok('and it is a SEVERE fraction, not a nudge', waded.mul <= 0.30,
+  `waterSpeedMul = ${waded.mul} -> ${(waded.walk * waded.mul).toFixed(2)} m/s`);
 
 // Put it in the lake but NOT on top of the player: at the same point it is
 // inside the 1.35m catch radius, the run ends instantly, fixedUpdate stops and
 // the speed freezes part-way down the ramp. The first version of this check
-// read 3.70 m/s - which is not 4.6 x 0.72 = 3.31, it is a corpse caught
+// read 3.70 m/s - which is not the swim speed at all, it is a corpse caught
 // mid-damp - and passed anyway. Hold them 26m apart and keep the player wet.
 const swimHold = setInterval(() => {
   page.evaluate(() => {
@@ -111,15 +118,65 @@ clearInterval(swimHold);
 const swam = await page.evaluate(() => {
   const s = window.__EMEEM__.state;
   const w = window.__EMEEM__.world;
-  return { speed: +s.monster.speed.toFixed(2), tier: s.level.speed, wade: 7.2 * 0.40,
+  const C = window.__EMEEM__.ctx.CONFIG;
+  return { speed: +s.monster.speed.toFixed(2), tier: s.level.speed, f: C.world.swimFactor,
+           wade: C.player.walkSpeed * C.world.waterSpeedMul,
            phase: s.phase, wet: +w.waterAt(s.monster.pos.x, s.monster.pos.z).toFixed(2) };
 });
 ok('the swim check measured a LIVE game', swam.phase === 'playing', swam.phase);
 ok('the Protector was actually in the water', swam.wet === 1, `wet = ${swam.wet}`);
-ok('the Protector swims slower than it runs', swam.speed < swam.tier * 0.85,
-  `${swam.speed} m/s vs ${swam.tier} on land (expected ${(swam.tier * 0.72).toFixed(2)})`);
+ok('the Protector swims MUCH slower than it runs', swam.speed < swam.tier * 0.62,
+  `${swam.speed} m/s vs ${swam.tier} on land (expected ${(swam.tier * swam.f).toFixed(2)})`);
 ok('but still faster than a wader', swam.speed > swam.wade,
   `${swam.speed} m/s vs ${swam.wade.toFixed(2)} wading`);
+
+/* --------------------------------------------------------------- the swim
+ *
+ * The creature's rig drops SWIM_SINK into the water and hauls itself along with
+ * an overarm stroke. The drop is the observable part - the opaque ground plane
+ * occludes everything below the feet line, which is what makes the legs vanish
+ * under the surface for free - and it is published on the rig group because the
+ * portrait camera frames one node above it and would otherwise keep aiming at a
+ * chest that is no longer there.
+ */
+console.log('\n== the Protector swims rather than strolling along the bottom ==');
+const rigDrop = () => page.evaluate(() => {
+  let drop = null;
+  window.__EMEEM__.ctx.scene.traverse((o) => {
+    if (o.userData && typeof o.userData.portraitDrop === 'number') drop = o.userData.portraitDrop;
+  });
+  return { drop, wet: window.__EMEEM__.state.monster.wet };
+});
+
+const dryHold = setInterval(() => {
+  page.evaluate(() => {
+    const s = window.__EMEEM__.state;
+    if (s.phase !== 'playing') return;
+    s.player.pos.set(0, 0, -200);
+    s.monster.pos.set(0, 0, -226);
+  }).catch(() => {});
+}, 100);
+await mark(); await gameWait(1.6);
+clearInterval(dryHold);
+const onLand = await rigDrop();
+ok('on land the rig stands at its full height', onLand.drop !== null && onLand.drop < 0.02,
+  `drop = ${onLand.drop}, wet = ${onLand.wet}`);
+
+const wetHold = setInterval(() => {
+  page.evaluate(() => {
+    const s = window.__EMEEM__.state;
+    if (s.phase !== 'playing') return;
+    s.player.pos.set(0, 0, -408);
+    s.monster.pos.set(0, 0, -430);
+  }).catch(() => {});
+}, 100);
+await mark(); await gameWait(2.4);
+clearInterval(wetHold);
+const inWater = await rigDrop();
+ok('in open water it is IN the water, not on it', inWater.wet === 1 && inWater.drop > 0.9,
+  `drop = ${inWater.drop}m of a 1.20m sink, wet = ${inWater.wet}`);
+ok('and the drop is a real change, not a constant', inWater.drop - onLand.drop > 0.9,
+  `${onLand.drop} on land -> ${inWater.drop} in the lake`);
 
 /* ------------------------------------------------------------------- wakes
  *
@@ -300,38 +357,47 @@ await mark(); await gameWait(0.5);
  * Everything above proves mechanisms: the boat is faster than a swimmer, a
  * crossing costs two thirds of a hull. None of it proves the thing a player
  * actually asks, which is whether going for the canoe instead of wading keeps
- * them alive. Measured, at THE END, from the same start:
+ * them alive.
  *
- *   wade  -> caught in 4.7s, 19m short of the far shore
- *   canoe -> across in 9.5s, 25m of clear water behind
+ * The two cells are deliberately asymmetric, because each is the STRONGEST
+ * version of its claim:
  *
- * That gap is the whole feature, and it is the first casualty of any retune of
- * swimFactor, waterSpeedMul or boat.speed - so it is pinned here rather than
- * left to be rediscovered by someone drowning.
+ *   wading at WATCHING  - the gentlest tier in the game, the Protector at its
+ *                         slowest. Caught after 11.4s, eleven metres in. If the
+ *                         lake is lethal on foot here it is lethal everywhere.
+ *   the canoe at THE END - the harshest tier, the Protector at 9.2 m/s. Across
+ *                         in 9.4s with 25m of clear water behind. If the canoe
+ *                         saves you here it saves you everywhere.
+ *
+ * That pair is the whole feature and the first casualty of any retune of
+ * waterSpeedMul, swimFactor or boat.speed, so it is pinned rather than left to
+ * be rediscovered by someone drowning.
  */
 console.log('\n== the canoe is the answer and wading is not ==');
 const CZ0 = -420;
 for (const useBoat of [false, true]) {
-  const r = await page.evaluate(async ([boat, cz]) => {
+  // The gentlest tier for the wade, the harshest for the canoe.
+  const tierIdx = useBoat ? 7 : 0;
+  const r = await page.evaluate(async ([boat, cz, ti]) => {
     const E = window.__EMEEM__;
     const gwait = (s) => new Promise((d) => {
       const t0 = E.state.time;
       const tick = () => { if (E.state.time - t0 >= s || E.state.phase !== 'playing') d(); else requestAnimationFrame(tick); };
       requestAnimationFrame(tick);
     });
-    const topTier = () => {
+    const holdTier = () => {
       // Re-applied every step. An amaam taken in passing costs 2 points and
       // drops the tier under the measurement - which is how an earlier version
       // of this reported a cell it had not run.
-      E.state.score = 95;
-      E.state.levelIndex = E.CONFIG.levels.length - 1;
-      E.state.level = E.CONFIG.levels[E.state.levelIndex];
+      E.state.levelIndex = ti;
+      E.state.level = E.CONFIG.levels[ti];
+      E.state.score = E.state.level.score;
       E.state.dread = E.state.level.dread;
     };
     E.bus.emit('restart');
     await gwait(0.2);
     E.boats.reset();
-    topTier();
+    holdTier();
     // Beside the middle mooring to board; 12m clear of it to be sure the wading
     // run cannot board by accident.
     E.state.player.pos.set(boat ? 0 : 12, 0, cz + 34);
@@ -346,7 +412,7 @@ for (const useBoat of [false, true]) {
     let escaped = false;
     for (let i = 0; i < 300; i++) {
       await gwait(0.25);
-      topTier();
+      holdTier();
       if (E.state.phase !== 'playing') break;
       const p = E.state.player.pos;
       if (p.z < cz - 20 && E.world.waterAt(p.x, p.z) === 0) { escaped = true; break; }
@@ -356,15 +422,16 @@ for (const useBoat of [false, true]) {
     return { boarded, escaped, died: E.state.phase !== 'playing',
              secs: +(E.state.time - t0).toFixed(1), z: +E.state.player.pos.z.toFixed(1),
              tier: E.state.level.name };
-  }, [useBoat, CZ0]);
+  }, [useBoat, CZ0, tierIdx]);
 
   if (useBoat) {
     ok('the canoe run actually boarded', r.boarded, `riding = ${r.boarded}`);
-    ok('at THE END, the canoe gets you across alive', r.escaped && !r.died,
+    ok('at the HARSHEST tier the canoe still gets you across alive', r.escaped && !r.died,
       `${r.tier}: ${r.escaped ? 'across' : 'stopped'} in ${r.secs}s at z=${r.z}`);
   } else {
     ok('the wading run stayed on foot', !r.boarded, `riding = ${r.boarded}`);
-    ok('at THE END, wading the same lake gets you caught', r.died && !r.escaped,
+    ok('at the GENTLEST tier wading the same lake still gets you caught',
+      r.died && !r.escaped,
       `${r.tier}: ${r.died ? 'caught' : 'survived'} after ${r.secs}s at z=${r.z}`);
   }
 }
