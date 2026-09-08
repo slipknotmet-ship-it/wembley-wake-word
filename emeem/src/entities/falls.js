@@ -28,7 +28,7 @@
 import * as THREE from 'three';
 import { CONFIG } from '../core/config.js';
 import {
-  lakeIndex, lakeCentreZ, lakeCentreX, shoreWarp, LAKE_HALF_Z, waterAt,
+  lakeIndex, lakeCentreZ, lakeCentreX, shoreWarp, LAKE_HALF_Z, waterAt, fallsLipZ,
 } from '../world/biome.js';
 
 /** Metres the hand falls. Deep enough that the far wall is out of reach. */
@@ -52,6 +52,15 @@ const C_ROCK_DARK = [1.95, 1.86, 2.05];
 const C_ROCK_LIP = [1.15, 1.12, 1.10];
 const C_MIST = [1.00, 1.00, 1.00];
 
+/** Source blob for the cloud bank, non-indexed so its triangles can be read
+ *  straight out and re-emitted at any size. */
+const ICO = (() => {
+  const g = new THREE.IcosahedronGeometry(1, 1).toNonIndexed();
+  g.deleteAttribute('uv');
+  g.deleteAttribute('normal');
+  return g;
+})();
+
 /** Accumulates flat-shaded triangles with a baked vertex colour. */
 function makeSink() {
   const pos = [], nor = [], col = [];
@@ -70,6 +79,18 @@ function makeSink() {
     quad(a, b, c, d, r, g, bl) {
       tri(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2], r, g, bl);
       tri(a[0], a[1], a[2], c[0], c[1], c[2], d[0], d[1], d[2], r, g, bl);
+    },
+    /** One transformed icosahedron. Clouds are not made of boxes. */
+    blob(cx, cy, cz, rx, ry, rz, r, g, bl) {
+      const src = ICO.attributes.position.array;
+      for (let i = 0; i < src.length; i += 9) {
+        tri(
+          cx + src[i] * rx, cy + src[i + 1] * ry, cz + src[i + 2] * rz,
+          cx + src[i + 3] * rx, cy + src[i + 4] * ry, cz + src[i + 5] * rz,
+          cx + src[i + 6] * rx, cy + src[i + 7] * ry, cz + src[i + 8] * rz,
+          r, g, bl,
+        );
+      }
     },
     box(cx, cy, cz, hx, hy, hz, r, g, bl) {
       const x0 = cx - hx, x1 = cx + hx, y0 = cy - hy, y1 = cy + hy, z0 = cz - hz, z1 = cz + hz;
@@ -219,6 +240,99 @@ export function createFalls(ctx, stoneMaterial) {
   mist.name = 'falls-mist';
   group.add(mist);
 
+  // --------------------------------------------------------- the cloud bank
+  /**
+   * WHAT YOU SEE INSTEAD OF THE CITY.
+   *
+   * Standing on the far shore of the first lake you could see the city waiting
+   * across the drop, which announced the landing before the fall had started
+   * and made forty-six metres look like a step onto the next block. Reported
+   * from play, and right: the edge of a waterfall should show you sky.
+   *
+   * So a bank of cloud sits ten metres past the lip. It is not a backdrop - it
+   * is opaque geometry twenty-four metres tall and a hundred and eighty wide,
+   * and it OCCLUDES. A nine-metre pylon a hundred metres beyond it is behind
+   * four metres of cloud from the player's eye line; nothing gets through. The
+   * strip in front of it is kept empty by inFallsVoid, so nothing pokes out.
+   *
+   * It lives in its own group rather than in the cutscene's, because it has to
+   * be visible for the whole approach - the cutscene's group is hidden until
+   * you are already falling.
+   */
+  /**
+   * Built from a handful of very large, heavily overlapping blobs rather than a
+   * row of similar ones, and drawn UNLIT.
+   *
+   * The first cut was Lambert with a mid grey and fifty medium blobs, and it
+   * came out as a scree slope: distinct lumps, each with a lit face and a dark
+   * one. Shading is exactly what a cloud does not have. A basic material with
+   * the form baked into the vertex colours - bright at the top, greyer
+   * underneath - reads as cloud at any distance, and the scene fog then blends
+   * its far edge into the sky for free.
+   *
+   * The bottom row sinks BELOW the ground plane so there is no seam where the
+   * bank meets the land, and the whole thing is opaque, because its job is to
+   * occlude: a transparent cloud shows you the city through it.
+   */
+  const bankGroup = new THREE.Group();
+  bankGroup.name = 'falls-cloud';
+  bankGroup.visible = false;
+  {
+    const B = makeSink();
+    // A cheap deterministic wobble, so the silhouette is ragged without a rng.
+    const w = (i, k) => {
+      const v = Math.sin(i * 12.9898 + k * 78.233) * 43758.5453;
+      return v - Math.floor(v);
+    };
+    // Rows from the lip backwards. Nearer rows are lower and denser; far ones
+    // taller and paler, so the bank builds up into the sky as it recedes.
+    // SMALLER AND MORE OF THEM. Nine blobs of radius 17 across the view is not
+    // a cloud bank, it is one white field with no top edge and no sky above it,
+    // which is what the second cut of this looked like. The bank has to reach
+    // about ten metres - enough to hide a pylon standing just past the keep-out
+    // - and no higher, or it stops being weather and becomes a ceiling.
+    const rows = [
+      { z: -6, n: 15, rx: 11, ry: 6.0, y: 1.5, tone: 0.84 },
+      { z: -18, n: 13, rx: 13, ry: 7.5, y: 4.0, tone: 0.90 },
+      { z: -34, n: 11, rx: 15, ry: 9.0, y: 8.0, tone: 0.97 },
+      { z: -54, n: 9, rx: 17, ry: 10.5, y: 12.0, tone: 1.03 },
+    ];
+    for (let r = 0; r < rows.length; r++) {
+      const row = rows[r];
+      for (let i = 0; i < row.n; i++) {
+        const f = (i / (row.n - 1)) * 2 - 1;
+        const a = w(i, r), b2 = w(i + 31, r), c2 = w(i + 57, r);
+        const rx = row.rx * (0.78 + a * 0.55);
+        const ry = row.ry * (0.70 + b2 * 0.62);
+        // The vertical gain is what gives a cloud its form without a light:
+        // the crown catches, the belly does not.
+        const top = row.tone * (0.98 + c2 * 0.10);
+        const bot = row.tone * 0.74;
+        // Two stacked blobs per position, the lower one duller, which is a
+        // gradient for the price of one more blob.
+        B.blob(f * 108 + (a - 0.5) * 22, row.y + ry * 0.55, row.z + (b2 - 0.5) * 14,
+          rx, ry, rx * 0.82, top, top * 1.005, top * 1.02);
+        B.blob(f * 108 + (b2 - 0.5) * 20, row.y - ry * 0.30, row.z + (c2 - 0.5) * 12,
+          rx * 0.92, ry * 0.72, rx * 0.78, bot, bot * 1.01, bot * 1.05);
+      }
+    }
+    // A sill sunk below the ground plane, so the bank never shows a seam or a
+    // strip of land underneath it.
+    for (let i = 0; i < 13; i++) {
+      const f = (i / 12) * 2 - 1;
+      const j = w(i, 9);
+      B.blob(f * 108, -3.2 + j * 2.2, -2 - j * 5, 13, 4.5 + j * 2, 7, 0.80, 0.81, 0.85);
+    }
+    // UNLIT. See the note above: shading is what made the first version rock.
+    const bankMat = new THREE.MeshBasicMaterial({ color: 0xfdfefe, vertexColors: true });
+    const bank = new THREE.Mesh(B.build(), bankMat);
+    bank.name = 'falls-cloud-mesh';
+    bank.castShadow = false;
+    bank.receiveShadow = false;
+    bank.frustumCulled = false;
+    bankGroup.add(bank);
+  }
+
   // ------------------------------------------------------------------ state
   /** 'off' | 'falling' | 'settling' */
   let mode = 'off';
@@ -257,6 +371,7 @@ export function createFalls(ctx, stoneMaterial) {
     }
     state.phase = 'falling';
     state.player.vel.set(0, 0, 0);
+    bankGroup.visible = false;
     // Pose the camera on THIS frame, not the next one. begin() used to return
     // before poseCamera ever ran, which left one frame of chase camera aimed at
     // a hand that had just been teleported onto the lip - a visible hitch at
@@ -335,8 +450,33 @@ export function createFalls(ctx, stoneMaterial) {
     if (ctx.engine && ctx.engine.setCinematic) ctx.engine.setCinematic(_camPos, _camLook);
   }
 
+  /**
+   * The bank sits at the lip and is shown for the whole approach - from the far
+   * side of the lake, across it, and up to the moment you go over. It is hidden
+   * once the fall starts (the cutscene has its own sky) and stays hidden after
+   * you land, because by then it is a hundred metres behind you and the only
+   * way to see it again would be to walk back into the gorge.
+   */
+  function placeBank(s) {
+    const p = s.player.pos;
+    // Only near the first lake, and only while the fall is still ahead of you.
+    if (usedThisRun || mode !== 'off' || lakeIndex(p.z) !== 0) {
+      bankGroup.visible = false;
+      return;
+    }
+    const lip = fallsLipZ(p.x);
+    // Behind you, or far enough back that fog has it anyway.
+    if (p.z < lip - 4 || p.z > lip + CONFIG.world.fogFar + 40) {
+      bankGroup.visible = false;
+      return;
+    }
+    bankGroup.position.set(0, GY, lip);
+    bankGroup.visible = true;
+  }
+
   function update(dt, c) {
     const s = (c && c.state) || state;
+    placeBank(s);
 
     if (mode === 'off') {
       if (s.phase !== 'playing' || usedThisRun) return 1;
@@ -393,10 +533,13 @@ export function createFalls(ctx, stoneMaterial) {
     mode = 'off';
     t = 0;
     usedThisRun = false;
+    bankGroup.visible = false;
   }
 
   return {
     group,
+    /** The cloud bank. Lives in the scene beside `group`, not inside it. */
+    bankGroup,
     update,
     reset,
     /** True while the cutscene owns the screen. */

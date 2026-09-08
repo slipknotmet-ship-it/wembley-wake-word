@@ -76,6 +76,7 @@ ctx.boats = boats;
 // group is what gets hidden while the cutscene is running.
 const falls = createFalls(ctx, ctx.world.stoneMaterial);
 engine.scene.add(falls.group);
+engine.scene.add(falls.bankGroup);
 ctx.falls = falls;
 const hud = createHUD(uiRoot, ctx);
 const touch = createTouchControls(uiRoot, ctx);
