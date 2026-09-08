@@ -138,7 +138,7 @@ export const CONFIG = {
       {
         // BEACH - dunes, and little else standing. Everything bleached.
         name: 'beach',
-        mix: { tree: 0.04, rock: 0.07, bush: 0.13, fallen: 0.08, dune: 0.68, pylon: 0 },
+        mix: { tree: 0.04, rock: 0.09, bush: 0.15, fallen: 0.08, dune: 0.64, pylon: 0 },
         treeH: [6.0, 8.5], bareTrees: 0.55,
         rock: { cobble: 0.62, slab: 0.30, block: 0.08 },
         // Marram grass: low, and there is a lot of it.
@@ -172,9 +172,20 @@ export const CONFIG = {
     fallen: { len: [4.0, 9.0], radius: [0.22, 0.46] },
     /**
      * A DUNE. Wide and low: a ridge you hop rather than a wall you go round.
-     * `top` stays clear of rockHopCeiling with the same margin the slabs use.
+     *
+     * LOW AND SHORT ON PURPOSE. The player hops a dune; the Protector cannot -
+     * it has no jump, only a step-over - so every dune is an asymmetry in the
+     * player's favour, and at 15m long and 1.34m high there were enough of them
+     * that the asymmetry became absolute. Measured: from 34m away, on an open
+     * beach, against a player standing perfectly still, it closed 23m in thirty
+     * seconds. A biome the creature cannot cross is a safe room, and a safe
+     * room in a chase game is the end of the game.
+     *
+     * 5-10m long and under a metre keeps the hop and gives the steering fan
+     * room to route between them. tools/water.mjs pins the outcome rather than
+     * these numbers: it puts the creature on a beach and requires it to arrive.
      */
-    dune: { halfX: [3.6, 7.6], top: [0.62, 1.34] },
+    dune: { halfX: [2.6, 5.0], top: [0.45, 0.95] },
     /**
      * A CITY PYLON. Tall enough that it is never hoppable and never mistaken
      * for a rock, and spaced hard so a street is always walkable.

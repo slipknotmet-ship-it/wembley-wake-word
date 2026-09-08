@@ -198,6 +198,18 @@ export function createRenderer(canvasEl) {
   let deathCam = false;
   const _kill = new THREE.Vector3();
 
+  /**
+   * A CINEMATIC OVERRIDE, for the waterfall.
+   *
+   * When set, the chase rig is bypassed entirely and the camera is put exactly
+   * where it is told, with no easing: the cutscene computes its own smooth path
+   * and a second smoothing on top of it would drag the camera behind its own
+   * choreography. Cleared by reset() and by the cutscene itself, so it can
+   * never survive into play.
+   */
+  let cinePos = null;
+  let cineLook = null;
+
   // Camera state kept outside camera.position so shake can be layered on top
   // without feeding back into the smoothing.
   const camBase = new THREE.Vector3();
@@ -481,6 +493,16 @@ export function createRenderer(canvasEl) {
       pp.z - CONFIG.camera.lookAhead,
     );
 
+    // 3a. A cutscene owns the camera outright while it is running.
+    if (cinePos && cineLook) {
+      camBase.copy(cinePos);
+      lookTarget.copy(cineLook);
+      camera.position.copy(camBase);
+      camera.lookAt(lookTarget);
+      followShadowCamera(pp);
+      return;
+    }
+
     // 3b. ...unless the run just ended, in which case go and look at it.
     let lerpRate = 0;
     if (deathCam && S.monster && S.monster.pos) {
@@ -758,6 +780,8 @@ export function createRenderer(canvasEl) {
     lastDread = -1;
     lastAtmoX = 1e9;
     lastAtmoZ = 1e9;
+    cinePos = null;
+    cineLook = null;
     // A real position, not a default: setDread's fallbacks are the sentinels
     // above, and lerping toward a sentinel is how a sky ends up NaN and black.
     setDread(0, globalState.player.pos.x, globalState.player.pos.z);
@@ -792,6 +816,28 @@ export function createRenderer(canvasEl) {
      * impossible for it to be running while the game is playable.
      */
     deathCamera: () => { deathCam = true; },
+    /**
+     * Put the camera exactly here, looking exactly there, until called again
+     * with nulls. Vectors are COPIED, so the caller may reuse its scratch.
+     */
+    setCinematic: (pos, look) => {
+      if (pos && look) {
+        cinePos = (cinePos || new THREE.Vector3()).copy(pos);
+        cineLook = (cineLook || new THREE.Vector3()).copy(look);
+      } else {
+        cinePos = null;
+        cineLook = null;
+      }
+    },
+    isCinematic: () => !!cinePos,
+    /**
+     * Put the chase rig exactly on its target for a position, with no easing.
+     * A cutscene leaves the camera forty metres down a gorge; letting the
+     * normal follow-lerp crawl back from there spends the first seconds of the
+     * next scene looking up at the world from underneath its own ground plane,
+     * which - the plane being single-sided - is a city floating in an empty sky.
+     */
+    snapCamera: (pos) => { snapTo(pos || globalState.player.pos); },
     /** For the suites: is the camera off its fixed heading right now? */
     isDeathCamera: () => deathCam,
     /** Main-pass draw stats. See the comment on `gpu` above before trusting
