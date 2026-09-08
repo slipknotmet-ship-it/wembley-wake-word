@@ -8,6 +8,7 @@ import { createPlayer } from './entities/player.js';
 import { createEmeems } from './entities/emeem.js';
 import { createMonster } from './entities/monster.js';
 import { createBoats } from './entities/boat.js';
+import { createFalls } from './entities/falls.js';
 import { createTouchControls } from './ui/touch.js';
 import { createHUD } from './ui/hud.js';
 import { createAudio } from './audio/sfx.js';
@@ -71,6 +72,11 @@ const monster = createMonster(ctx);
 const boats = createBoats(ctx, ctx.world.barkMaterial);
 ctx.world.group.add(boats.group);
 ctx.boats = boats;
+// The waterfall's diorama sits in the SCENE, not in the world group - the world
+// group is what gets hidden while the cutscene is running.
+const falls = createFalls(ctx, ctx.world.stoneMaterial);
+engine.scene.add(falls.group);
+ctx.falls = falls;
 const hud = createHUD(uiRoot, ctx);
 const touch = createTouchControls(uiRoot, ctx);
 
@@ -128,6 +134,7 @@ function startRun() {
   ctx.audio.resume();
   ctx.world.reset();
   boats.reset();
+  falls.reset();
   player.reset();
   // monster.reset() BEFORE emeems.reset(). resetState() parks the monster at
   // -spawnDistance, but reset() is what actually puts it BEHIND the player at
@@ -166,6 +173,14 @@ function frame(now) {
   // camera lerp steps, two dread steps, and the death shake decayed before it
   // was ever drawn.
   engine.update(dt, ctx);
+
+  // THE WATERFALL owns the clock while it runs. It returns a time scale, and
+  // that scale is applied to `dt` for the whole rest of the frame - the hand's
+  // own animation, the mist, the camera easing - because a fall that is the
+  // only slow thing on screen does not read as slow motion, it reads as lag.
+  const timeScale = falls.update(dt, ctx);
+  if (timeScale !== 1) dt *= timeScale;
+  state.dt = dt;
 
   if (state.phase === 'playing') {
     state.time += dt;
@@ -210,4 +225,4 @@ hud.showStart();
 requestAnimationFrame(frame);
 
 // Expose a tiny handle for the automated smoke test / manual debugging.
-window.__EMEEM__ = { ctx, state, bus, startRun, engine, world: ctx.world, player, monster, emeems, boats, touch, CONFIG };
+window.__EMEEM__ = { ctx, state, bus, startRun, engine, world: ctx.world, player, monster, emeems, boats, falls, touch, CONFIG };

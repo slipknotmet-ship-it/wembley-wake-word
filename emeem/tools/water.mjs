@@ -404,11 +404,16 @@ await mark(); await gameWait(0.5);
  * be rediscovered by someone drowning.
  */
 console.log('\n== the canoe is the answer and wading is not ==');
-const CZ0 = lakeZ(0);
+// LAKE 1, not lake 0. Crossing lake 0 now ends in the waterfall cutscene, so
+// "did wading get you caught" cannot be asked there any more - the answer is
+// always "no, you went over the falls". Lake 1 is the same lake without the
+// set piece.
+const CZ0 = lakeZ(1);
+const CX0 = lakeX(1);
 for (const useBoat of [false, true]) {
   // The gentlest tier for the wade, the harshest for the canoe.
   const tierIdx = useBoat ? 7 : 0;
-  const r = await page.evaluate(async ([boat, cz, ti]) => {
+  const r = await page.evaluate(async ([boat, cz, ti, cx]) => {
     const E = window.__EMEEM__;
     const gwait = (s) => new Promise((d) => {
       const t0 = E.state.time;
@@ -430,8 +435,8 @@ for (const useBoat of [false, true]) {
     holdTier();
     // Beside the middle mooring to board; 12m clear of it to be sure the wading
     // run cannot board by accident.
-    E.state.player.pos.set(boat ? 0 : 12, 0, cz + 34);
-    E.state.monster.pos.set(0, 0, cz + 52);        // 18m behind, either way
+    E.state.player.pos.set(boat ? cx : cx + 12, 0, cz + 34);
+    E.state.monster.pos.set(cx, 0, cz + 52);        // 18m behind, either way
     E.state.monster.speed = E.state.level.speed;
     await gwait(0.3);
     if (boat) { for (let i = 0; i < 12 && !E.boats.riding(); i++) await gwait(0.15); }
@@ -452,7 +457,7 @@ for (const useBoat of [false, true]) {
     return { boarded, escaped, died: E.state.phase !== 'playing',
              secs: +(E.state.time - t0).toFixed(1), z: +E.state.player.pos.z.toFixed(1),
              tier: E.state.level.name };
-  }, [useBoat, CZ0, tierIdx]);
+  }, [useBoat, CZ0, tierIdx, CX0]);
 
   if (useBoat) {
     ok('the canoe run actually boarded', r.boarded, `riding = ${r.boarded}`);
@@ -638,6 +643,138 @@ for (const n of [1, 2]) {
   await page.evaluate(() => { window.__EMEEM__.state.input.jumpPressed = true; });
   await mark(); await gameWait(0.4);
 }
+
+/* ------------------------------------------------------------ the waterfall
+ *
+ * The world is flat by construction, so a forty-six metre drop cannot exist in
+ * it. Going over the far lip of the FIRST lake therefore stops the simulation,
+ * hides the world, and shows a diorama instead - cliff, curtain, mist, basin -
+ * with the camera swinging downstream in slow motion while the hand falls past.
+ *
+ * The checks that matter are the ones about putting it all back. A cutscene
+ * that leaves the world hidden, the camera in a gorge or the phase stuck is a
+ * dead game, and none of that shows up in a screenshot of the pretty part.
+ */
+console.log('\n== the waterfall ==');
+const farLip = lakeZ(0) - LK.halfZ;
+
+await page.evaluate(() => { window.__EMEEM__.bus.emit('restart'); });
+await page.waitForFunction(() => window.__EMEEM__.state.phase === 'playing', null, { timeout: 20000 });
+await page.evaluate((z) => {
+  const E = window.__EMEEM__;
+  E.boats.reset();
+  E.state.player.pos.set(0, 0, z + 6);      // in the water, just short of the lip
+  E.state.monster.pos.set(20, 0, z + 130);  // far back: this is not a chase test
+  E.state.input.x = 0; E.state.input.z = 1;
+}, farLip);
+
+// Hold the creature off while the hand wades the last few metres.
+const farHold = setInterval(() => {
+  page.evaluate((z) => {
+    const E = window.__EMEEM__;
+    if (E.state.phase === 'playing') { E.state.monster.pos.set(20, 0, z + 130); E.state.input.z = 1; }
+  }, farLip).catch(() => {});
+}, 120);
+const fired = await page.waitForFunction(() => window.__EMEEM__.falls.active(), null, { timeout: 90000 })
+  .then(() => true).catch(() => false);
+clearInterval(farHold);
+ok('walking off the far lip of the first lake starts the fall', fired,
+  fired ? 'falls.active()' : 'never fired');
+
+const during = await page.evaluate(() => {
+  const E = window.__EMEEM__;
+  return {
+    phase: E.state.phase,
+    worldHidden: E.world.group.visible === false,
+    cinematic: E.engine.isCinematic(),
+    y: E.state.player.pos.y,
+  };
+});
+ok('the simulation stops while it plays', during.phase === 'falling', during.phase);
+ok('and the world is hidden, not left hanging in the sky', during.worldHidden,
+  `world.group.visible = ${!during.worldHidden}`);
+ok('the camera is on the cutscene, not the chase rig', during.cinematic === true, String(during.cinematic));
+
+// Let it run out.
+const landed = await page.waitForFunction(() => !window.__EMEEM__.falls.active(), null, { timeout: 60000 })
+  .then(() => true).catch(() => false);
+await page.evaluate(() => { const i = window.__EMEEM__.state.input; i.x = 0; i.z = 0; });
+const after = await page.evaluate(() => {
+  const E = window.__EMEEM__;
+  return {
+    phase: E.state.phase,
+    y: +E.state.player.pos.y.toFixed(3),
+    z: +E.state.player.pos.z.toFixed(1),
+    worldVisible: E.world.group.visible,
+    cinematic: E.engine.isCinematic(),
+    groundY: E.CONFIG.world.groundY,
+    used: E.falls.debug().used,
+  };
+});
+ok('it ends on its own', landed && after.phase === 'playing', `${after.phase} after ${landed ? 'finishing' : 'a timeout'}`);
+ok('the world comes back', after.worldVisible === true, String(after.worldVisible));
+ok('the camera comes back', after.cinematic === false, String(after.cinematic));
+ok('the hand lands on the ground, not below it', Math.abs(after.y - after.groundY) < 0.01,
+  `y = ${after.y}, ground ${after.groundY}`);
+ok('and comes out past the lip, in the next band', after.z < farLip - 20,
+  `z = ${after.z}, lip at ${farLip.toFixed(0)}`);
+
+// ONCE. A set piece you meet every 1152m is a toll booth.
+const again = await page.evaluate((z) => {
+  const E = window.__EMEEM__;
+  E.state.player.pos.set(0, 0, z + 4);
+  return E.falls.debug().used;
+}, farLip);
+await mark(); await gameWait(1.2);
+const refired = await page.evaluate(() => window.__EMEEM__.falls.active());
+ok('it does not fire twice in one run', again === true && refired === false,
+  `used=${again}, active again=${refired}`);
+
+// ...but a new run re-arms it.
+await page.evaluate(() => { window.__EMEEM__.bus.emit('restart'); });
+await page.waitForFunction(() => window.__EMEEM__.state.phase === 'playing', null, { timeout: 20000 });
+const rearmed = await page.evaluate(() => window.__EMEEM__.falls.debug().used === false);
+ok('and a fresh run arms it again', rearmed, String(rearmed));
+
+/* ------------------------------------------ the Protector on an open beach
+ *
+ * The first lake sits at a beach centre, and a beach is 68% dunes - wide, low
+ * ridges the player HOPS and the creature has to go round, because it has no
+ * jump. That is a fair trade only if it can still catch someone standing still.
+ * If a dune field is a maze it cannot solve, the whole biome is a safe room.
+ */
+console.log('\n== the Protector still hunts on a beach ==');
+const hunt = await page.evaluate(async ([z]) => {
+  const E = window.__EMEEM__;
+  const gwait = (s) => new Promise((d) => {
+    const t0 = E.state.time;
+    const t = () => { if (E.state.time - t0 >= s || E.state.phase !== 'playing') d(); else requestAnimationFrame(t); };
+    requestAnimationFrame(t);
+  });
+  E.bus.emit('restart');
+  await gwait(0.2);
+  // Dry beach, well clear of the lake, player standing still.
+  E.state.player.pos.set(0, 0, z);
+  E.state.monster.pos.set(0, 0, z + 34);
+  E.state.input.x = 0; E.state.input.z = 0;
+  const start = 34;
+  let closest = start;
+  const t0 = E.state.time;
+  for (let i = 0; i < 200; i++) {
+    await gwait(0.25);
+    E.state.player.pos.set(0, 0, z);       // pinned: this measures the creature
+    const d = Math.hypot(E.state.monster.pos.x, E.state.monster.pos.z - z);
+    if (d < closest) closest = d;
+    if (E.state.phase !== 'playing' || E.state.time - t0 > 30) break;
+  }
+  return { closest: +closest.toFixed(1), start, caught: E.state.phase !== 'playing',
+           secs: +(E.state.time - t0).toFixed(1) };
+// A DRY beach band centre. Beaches recur every 4 * BIOME_BAND; the one at
+// LAKE_Z0 is under water, so take the next one along.
+}, [-(await page.evaluate(() => window.__EMEEM__.world.biomeLead + 6.5 * window.__EMEEM__.world.biomeBand))]);
+ok('it closes on a standing target through a dune field',
+  hunt.caught || hunt.closest < 3,
+  `${hunt.caught ? 'caught' : 'got to ' + hunt.closest + 'm'} in ${hunt.secs}s from ${hunt.start}m`);
 
 const realErrors = errors.filter((e) => !/WebGL|SwiftShader|fallback|deprecated/i.test(e));
 ok('no console errors', realErrors.length === 0, realErrors.slice(0, 2).join(' | '));

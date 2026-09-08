@@ -2030,6 +2030,9 @@ export function createWorld(ctx) {
     group, colliders, perches, pickPerch, queryAABB, sampleGroundY, update, reset,
     /** Shared so the boat costs no new material and no new draw call class. */
     barkMaterial,
+    stoneMaterial,
+    foliageMaterial,
+    primeAround,
     /** 0 on land, 1 in open water. The single source of truth for wetness. */
     waterAt,
     /** Diagnostics for the suites. */
