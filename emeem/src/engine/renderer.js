@@ -209,6 +209,8 @@ export function createRenderer(canvasEl) {
    */
   let cinePos = null;
   let cineLook = null;
+  /** Cutscene field of view, or 0 to leave the chase camera's own alone. */
+  let cineFov = 0;
 
   // Camera state kept outside camera.position so shake can be layered on top
   // without feeding back into the smoothing.
@@ -497,6 +499,15 @@ export function createRenderer(canvasEl) {
     if (cinePos && cineLook) {
       camBase.copy(cinePos);
       lookTarget.copy(cineLook);
+      // The cutscene owns the lens too. Written straight through rather than
+      // damped: the path already eases, and a second smoothing here would drag
+      // the zoom behind the move it is supposed to be part of.
+      if (cineFov && Math.abs(cineFov - appliedFov) > 0.01) {
+        appliedFov = cineFov;
+        currentFov = cineFov;
+        camera.fov = cineFov;
+        camera.updateProjectionMatrix();
+      }
       camera.position.copy(camBase);
       camera.lookAt(lookTarget);
       followShadowCamera(pp);
@@ -820,13 +831,15 @@ export function createRenderer(canvasEl) {
      * Put the camera exactly here, looking exactly there, until called again
      * with nulls. Vectors are COPIED, so the caller may reuse its scratch.
      */
-    setCinematic: (pos, look) => {
+    setCinematic: (pos, look, fov) => {
       if (pos && look) {
         cinePos = (cinePos || new THREE.Vector3()).copy(pos);
         cineLook = (cineLook || new THREE.Vector3()).copy(look);
+        cineFov = Number.isFinite(fov) && fov > 1 ? fov : 0;
       } else {
         cinePos = null;
         cineLook = null;
+        cineFov = 0;
       }
     },
     isCinematic: () => !!cinePos,

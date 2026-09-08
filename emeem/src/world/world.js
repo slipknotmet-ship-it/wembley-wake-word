@@ -1708,6 +1708,11 @@ export function createWorld(ctx) {
       // Ferns still grow nowhere near it.
       const wet = waterAt(px, pz);
       if (wet > SHALLOW_MAX) continue;
+      // The scatter pass places directly, without findSpot, so the falls
+      // keep-out has to be repeated here - and it matters more here than
+      // anywhere, because pebbles and ferns are exactly what makes a strip of
+      // ground read as ground.
+      if (inFallsVoid(px, pz, 0.8)) continue;
       if (wet > 0 || rng() < B.pebbleShare) {
         const r = range(rng, 0.20, 0.62);
         const h = range(rng, 0.09, 0.30);
@@ -2042,6 +2047,7 @@ export function createWorld(ctx) {
     waterAt,
     /** Diagnostics for the suites. */
     biomeNameAt,
+    inFallsVoid,
     biomeLead: BIOME_LEAD,
     biomeBand: BIOME_BAND,
     lakeZ0: LAKE_Z0,
