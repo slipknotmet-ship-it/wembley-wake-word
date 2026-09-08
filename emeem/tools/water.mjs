@@ -295,6 +295,88 @@ await page.evaluate(() => {
 });
 await mark(); await gameWait(0.5);
 
+/* ------------------------------------------------- and does the canoe SAVE you?
+ *
+ * Everything above proves mechanisms: the boat is faster than a swimmer, a
+ * crossing costs two thirds of a hull. None of it proves the thing a player
+ * actually asks, which is whether going for the canoe instead of wading keeps
+ * them alive. Measured, at THE END, from the same start:
+ *
+ *   wade  -> caught in 4.7s, 19m short of the far shore
+ *   canoe -> across in 9.5s, 25m of clear water behind
+ *
+ * That gap is the whole feature, and it is the first casualty of any retune of
+ * swimFactor, waterSpeedMul or boat.speed - so it is pinned here rather than
+ * left to be rediscovered by someone drowning.
+ */
+console.log('\n== the canoe is the answer and wading is not ==');
+const CZ0 = -420;
+for (const useBoat of [false, true]) {
+  const r = await page.evaluate(async ([boat, cz]) => {
+    const E = window.__EMEEM__;
+    const gwait = (s) => new Promise((d) => {
+      const t0 = E.state.time;
+      const tick = () => { if (E.state.time - t0 >= s || E.state.phase !== 'playing') d(); else requestAnimationFrame(tick); };
+      requestAnimationFrame(tick);
+    });
+    const topTier = () => {
+      // Re-applied every step. An amaam taken in passing costs 2 points and
+      // drops the tier under the measurement - which is how an earlier version
+      // of this reported a cell it had not run.
+      E.state.score = 95;
+      E.state.levelIndex = E.CONFIG.levels.length - 1;
+      E.state.level = E.CONFIG.levels[E.state.levelIndex];
+      E.state.dread = E.state.level.dread;
+    };
+    E.bus.emit('restart');
+    await gwait(0.2);
+    E.boats.reset();
+    topTier();
+    // Beside the middle mooring to board; 12m clear of it to be sure the wading
+    // run cannot board by accident.
+    E.state.player.pos.set(boat ? 0 : 12, 0, cz + 34);
+    E.state.monster.pos.set(0, 0, cz + 52);        // 18m behind, either way
+    E.state.monster.speed = E.state.level.speed;
+    await gwait(0.3);
+    if (boat) { for (let i = 0; i < 12 && !E.boats.riding(); i++) await gwait(0.15); }
+    const boarded = E.boats.riding();
+
+    E.state.input.x = 0; E.state.input.z = 1;      // hold UP and commit
+    const t0 = E.state.time;
+    let escaped = false;
+    for (let i = 0; i < 300; i++) {
+      await gwait(0.25);
+      topTier();
+      if (E.state.phase !== 'playing') break;
+      const p = E.state.player.pos;
+      if (p.z < cz - 20 && E.world.waterAt(p.x, p.z) === 0) { escaped = true; break; }
+      if (E.state.time - t0 > 40) break;
+    }
+    E.state.input.z = 0;
+    return { boarded, escaped, died: E.state.phase !== 'playing',
+             secs: +(E.state.time - t0).toFixed(1), z: +E.state.player.pos.z.toFixed(1),
+             tier: E.state.level.name };
+  }, [useBoat, CZ0]);
+
+  if (useBoat) {
+    ok('the canoe run actually boarded', r.boarded, `riding = ${r.boarded}`);
+    ok('at THE END, the canoe gets you across alive', r.escaped && !r.died,
+      `${r.tier}: ${r.escaped ? 'across' : 'stopped'} in ${r.secs}s at z=${r.z}`);
+  } else {
+    ok('the wading run stayed on foot', !r.boarded, `riding = ${r.boarded}`);
+    ok('at THE END, wading the same lake gets you caught', r.died && !r.escaped,
+      `${r.tier}: ${r.died ? 'caught' : 'survived'} after ${r.secs}s at z=${r.z}`);
+  }
+}
+// Back to a clean, live run for whatever comes next.
+await page.evaluate(() => {
+  const E = window.__EMEEM__;
+  E.state.input.x = 0; E.state.input.z = 0;
+  E.bus.emit('restart');
+});
+await page.waitForFunction(() => window.__EMEEM__.state.phase === 'playing', null, { timeout: 20000 });
+await page.evaluate(() => { window.__EMEEM__.boats.reset(); });
+
 /* --------------------------------------------------------- the lakes AFTER the first
  *
  * Everything above tests lake 0 at z=-420, and for a while that was the whole
