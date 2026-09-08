@@ -1014,6 +1014,10 @@ export function createEmeems(ctx) {
       // spot rather than a hazard, and the whole point of crossing it is that
       // it costs you scoring time.
       if (world && world.waterAt && world.waterAt(x, z) > 0) continue;
+      // Nor in the strip past the first lake's lip, which is dressed to look
+      // like the edge of the world. A row of glowing prizes on it says the
+      // ground continues, which is the one thing it must not say.
+      if (world && world.inFallsVoid && world.inFallsVoid(x, z, 1.0)) continue;
 
       // --- perched: sit this one on top of a rock instead of on the ground.
       //

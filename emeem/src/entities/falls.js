@@ -33,10 +33,19 @@ import {
 
 /** Metres the hand falls. Deep enough that the far wall is out of reach. */
 const DROP = 46;
-/** Seconds the fall takes, in wall time. It is slow on purpose. */
-const FALL_TIME = 3.4;
-/** Seconds after the landing before control comes back. */
-const SETTLE_TIME = 0.55;
+/**
+ * Seconds the fall takes, in WALL time - main.js applies the slow-motion scale
+ * after this module has already advanced its own clock, so this is real
+ * seconds and not game seconds.
+ *
+ * Five is a long time to hold a player still, and it is the right length
+ * anyway: the shot has three beats in it - the hang at the lip, the drop past
+ * the curtain, and the pull-back onto the whole waterfall - and at 3.4s the
+ * first and last were a blur either side of the middle one.
+ */
+const FALL_TIME = 5.2;
+/** Seconds the finished frame is held before control comes back. */
+const SETTLE_TIME = 1.2;
 /** Metres past the lip the hand is standing when it all comes back. */
 const LAND_AHEAD = 30;
 
@@ -74,6 +83,18 @@ function makeSink() {
     nor.push(nx, ny, nz, nx, ny, nz, nx, ny, nz);
     col.push(r, g, b, r, g, b, r, g, b);
   };
+  /** Same, but each vertex carries its own colour. */
+  const triC = (ax, ay, az, bx, by, bz, cx, cy, cz, ca, cb, cc) => {
+    const ux = bx - ax, uy = by - ay, uz = bz - az;
+    const vx = cx - ax, vy = cy - ay, vz = cz - az;
+    let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const len = Math.hypot(nx, ny, nz) || 1;
+    nx /= len; ny /= len; nz /= len;
+    pos.push(ax, ay, az, bx, by, bz, cx, cy, cz);
+    nor.push(nx, ny, nz, nx, ny, nz, nx, ny, nz);
+    col.push(ca[0], ca[1], ca[2], cb[0], cb[1], cb[2], cc[0], cc[1], cc[2]);
+  };
+
   return {
     tri,
     quad(a, b, c, d, r, g, bl) {
@@ -89,6 +110,42 @@ function makeSink() {
           cx + src[i + 3] * rx, cy + src[i + 4] * ry, cz + src[i + 5] * rz,
           cx + src[i + 6] * rx, cy + src[i + 7] * ry, cz + src[i + 8] * rz,
           r, g, bl,
+        );
+      }
+    },
+    /**
+     * A blob with a vertical gradient baked in PER VERTEX: `top` at its crown,
+     * `bot` at its underside, eased between.
+     *
+     * This is the whole difference between cloud and cotton wool. The material
+     * is unlit - it has to be, because a lit one makes every puff a rock - so
+     * the only place form can come from is the colour, and a flat tone per blob
+     * gives a flat blob. A bright warm crown over a cool blue-grey belly is
+     * what the eye reads as a lit cumulus, and it costs nothing: the same
+     * triangles, with three colours instead of one.
+     * @param {number[]} top  crown colour
+     * @param {number[]} bot  underside colour
+     * @param {number[]} out  scratch, reused per vertex
+     */
+    gradBlob(cx, cy, cz, rx, ry, rz, top, bot) {
+      const src = ICO.attributes.position.array;
+      const c = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+      for (let i = 0; i < src.length; i += 9) {
+        for (let v = 0; v < 3; v++) {
+          const ly = src[i + v * 3 + 1];          // -1 .. 1 within the blob
+          let t = (ly + 1) * 0.5;
+          t = t * t * (3 - 2 * t);                // smoothstep, so no banding
+          // Biased toward the shaded end. Large overlapping blobs show mostly
+          // their UPPER hemispheres, so an even ramp puts almost every visible
+          // pixel in the bright half and the bank comes out flat white.
+          t = t * t * (2 - t);
+          for (let k = 0; k < 3; k++) c[v][k] = bot[k] + (top[k] - bot[k]) * t;
+        }
+        triC(
+          cx + src[i] * rx, cy + src[i + 1] * ry, cz + src[i + 2] * rz,
+          cx + src[i + 3] * rx, cy + src[i + 4] * ry, cz + src[i + 5] * rz,
+          cx + src[i + 6] * rx, cy + src[i + 7] * ry, cz + src[i + 8] * rz,
+          c[0], c[1], c[2],
         );
       }
     },
@@ -249,7 +306,7 @@ export function createFalls(ctx, stoneMaterial) {
    * and made forty-six metres look like a step onto the next block. Reported
    * from play, and right: the edge of a waterfall should show you sky.
    *
-   * So a bank of cloud sits ten metres past the lip. It is not a backdrop - it
+   * So a bank of cloud sits ON the lip. It is not a backdrop - it
    * is opaque geometry twenty-four metres tall and a hundred and eighty wide,
    * and it OCCLUDES. A nine-metre pylon a hundred metres beyond it is behind
    * four metres of cloud from the player's eye line; nothing gets through. The
@@ -284,47 +341,80 @@ export function createFalls(ctx, stoneMaterial) {
       const v = Math.sin(i * 12.9898 + k * 78.233) * 43758.5453;
       return v - Math.floor(v);
     };
-    // Rows from the lip backwards. Nearer rows are lower and denser; far ones
-    // taller and paler, so the bank builds up into the sky as it recedes.
-    // SMALLER AND MORE OF THEM. Nine blobs of radius 17 across the view is not
-    // a cloud bank, it is one white field with no top edge and no sky above it,
-    // which is what the second cut of this looked like. The bank has to reach
-    // about ten metres - enough to hide a pylon standing just past the keep-out
-    // - and no higher, or it stops being weather and becomes a ceiling.
+    /**
+     * The two ends of every puff's gradient.
+     *
+     * TOP is barely off white and slightly warm - sun on the crown. BOT is a
+     * cool blue-grey, which is the part that actually sells it: a cloud's
+     * underside is lit by the sky, not the sun, so it goes blue rather than
+     * simply dark. Cotton wool is what you get when both ends are white.
+     */
+    const CLOUD_TOP = [1.00, 0.995, 0.965];
+    const CLOUD_BOT = [0.52, 0.575, 0.715];
+    const scale = (c, k) => [c[0] * k, c[1] * k, c[2] * k];
+
+    // Rows from the lip backwards: nearer rows lower and denser, far ones
+    // taller and paler, so the bank builds into the sky as it recedes.
+    // Heights are set by COMPOSITION, not by how big a cloud ought to be. From
+    // the middle of the lake the top of frame is about 33m up; a bank topping
+    // 36m therefore fills the screen and leaves a sliver of blue in the
+    // corners, which is a ceiling, not weather. The near row tops out around
+    // 10m - just enough to hide a pylon standing past the keep-out - and the
+    // far rows are taller but further, so their apparent height matches and the
+    // whole bank sits at a bit over a third of the frame with sky above it.
     const rows = [
-      { z: -6, n: 15, rx: 11, ry: 6.0, y: 1.5, tone: 0.84 },
-      { z: -18, n: 13, rx: 13, ry: 7.5, y: 4.0, tone: 0.90 },
-      { z: -34, n: 11, rx: 15, ry: 9.0, y: 8.0, tone: 0.97 },
-      { z: -54, n: 9, rx: 17, ry: 10.5, y: 12.0, tone: 1.03 },
+      { z: -1, n: 17, rx: 9.5, ry: 3.6, y: 3.2, tone: 0.92 },
+      { z: -13, n: 15, rx: 11.0, ry: 4.4, y: 4.2, tone: 0.96 },
+      { z: -31, n: 13, rx: 13.0, ry: 5.2, y: 5.4, tone: 1.00 },
+      { z: -50, n: 11, rx: 15.0, ry: 6.0, y: 6.8, tone: 1.03 },
+      { z: -76, n: 9, rx: 18.0, ry: 7.0, y: 8.2, tone: 1.05 },
     ];
     for (let r = 0; r < rows.length; r++) {
       const row = rows[r];
+      const top = scale(CLOUD_TOP, row.tone);
+      const bot = scale(CLOUD_BOT, row.tone);
       for (let i = 0; i < row.n; i++) {
         const f = (i / (row.n - 1)) * 2 - 1;
         const a = w(i, r), b2 = w(i + 31, r), c2 = w(i + 57, r);
-        const rx = row.rx * (0.78 + a * 0.55);
-        const ry = row.ry * (0.70 + b2 * 0.62);
-        // The vertical gain is what gives a cloud its form without a light:
-        // the crown catches, the belly does not.
-        const top = row.tone * (0.98 + c2 * 0.10);
-        const bot = row.tone * 0.74;
-        // Two stacked blobs per position, the lower one duller, which is a
-        // gradient for the price of one more blob.
-        B.blob(f * 108 + (a - 0.5) * 22, row.y + ry * 0.55, row.z + (b2 - 0.5) * 14,
-          rx, ry, rx * 0.82, top, top * 1.005, top * 1.02);
-        B.blob(f * 108 + (b2 - 0.5) * 20, row.y - ry * 0.30, row.z + (c2 - 0.5) * 12,
-          rx * 0.92, ry * 0.72, rx * 0.78, bot, bot * 1.01, bot * 1.05);
+        const rx = row.rx * (0.72 + a * 0.62);
+        const ry = row.ry * (0.66 + b2 * 0.70);
+        const bx = f * 108 + (a - 0.5) * 20;
+        const by = row.y + ry * 0.42;
+        const bz = row.z + (b2 - 0.5) * 12;
+        B.gradBlob(bx, by, bz, rx, ry, rx * 0.80, top, bot);
+        // A smaller puff riding the crown of the big one. Cumulus is lumpy;
+        // one ellipsoid per position is a hillock, two is weather.
+        B.gradBlob(
+          bx + (c2 - 0.5) * rx * 0.9, by + ry * 0.62, bz + (a - 0.5) * 8,
+          rx * (0.38 + c2 * 0.26), ry * (0.40 + a * 0.26), rx * 0.34,
+          top, scale(CLOUD_BOT, row.tone * 1.10),
+        );
       }
     }
-    // A sill sunk below the ground plane, so the bank never shows a seam or a
-    // strip of land underneath it.
-    for (let i = 0; i < 13; i++) {
-      const f = (i / 12) * 2 - 1;
+    /**
+     * THE SILL: the part that is actually load-bearing.
+     *
+     * The decorative rows above are jittered in position and size, which is
+     * what stops them reading as a row of identical hills - and also what lets
+     * two small neighbours drift far enough apart to leave a gap. Five-metre
+     * props twenty metres past the lip were showing through exactly such gaps.
+     *
+     * So occlusion is not left to them. This row has NO x jitter, a spacing of
+     * nine metres against a radius of twelve, and a top around ten - so it is
+     * continuous by arithmetic rather than by luck, and ten metres is what it
+     * takes to hide a pylon standing past the keep-out. It also sinks below the
+     * ground plane, so there is never a seam where the bank meets the water.
+     */
+    const SILL_N = 25;
+    for (let i = 0; i < SILL_N; i++) {
+      const f = (i / (SILL_N - 1)) * 2 - 1;
       const j = w(i, 9);
-      B.blob(f * 108, -3.2 + j * 2.2, -2 - j * 5, 13, 4.5 + j * 2, 7, 0.80, 0.81, 0.85);
+      B.gradBlob(f * 108, -1.0 + j * 3.4, 1.5 - j * 5, 12, 5.6 + j * 1.6, 8,
+        scale(CLOUD_BOT, 1.30), scale(CLOUD_BOT, 0.84));
     }
-    // UNLIT. See the note above: shading is what made the first version rock.
-    const bankMat = new THREE.MeshBasicMaterial({ color: 0xfdfefe, vertexColors: true });
+    // UNLIT, and white: every bit of form above is in the vertex colours, so a
+    // light here would only flatten it back out again.
+    const bankMat = new THREE.MeshBasicMaterial({ color: 0xffffff, vertexColors: true });
     const bank = new THREE.Mesh(B.build(), bankMat);
     bank.name = 'falls-cloud-mesh';
     bank.castShadow = false;
@@ -339,7 +429,9 @@ export function createFalls(ctx, stoneMaterial) {
   let t = 0;
   let usedThisRun = false;
   let lipX = 0, lipZ = 0;
-  let worldWasVisible = true;
+  /** Everything the cutscene hid, so end() can put exactly it back. */
+  const hidden = [];
+  const engineScene = () => (ctx.engine && ctx.engine.scene) || ctx.scene;
   let entryYaw = 0;
 
   /** Where the far waterline of lake 0 sits on this column of x. */
@@ -362,12 +454,25 @@ export function createFalls(ctx, stoneMaterial) {
     group.position.set(lipX, GY, lipZ);
     group.visible = true;
 
-    // The world goes away. It has to: the ground plane is opaque and single
-    // sided, so from below it vanishes and leaves every tree in the district
-    // hanging in an empty sky. For three seconds the scene is the diorama.
-    if (ctx.world && ctx.world.group) {
-      worldWasVisible = ctx.world.group.visible;
-      ctx.world.group.visible = false;
+    // EVERYTHING ELSE GOES AWAY, not just the world.
+    //
+    // The ground plane is opaque and single sided, so from below the gorge it
+    // vanishes and leaves every tree in the district hanging in an empty sky.
+    // Hiding world.group fixes the trees - and misses the emeems, the monster
+    // and the boats, which are their own groups in the scene. The first version
+    // of this shot had a bush and a row of prizes floating over the waterfall.
+    //
+    // So it hides by exclusion rather than by a list: everything at the top of
+    // the scene except the diorama, the hand and the lights. A group added
+    // later cannot be forgotten, because nothing has to remember it.
+    hidden.length = 0;
+    for (const child of engineScene().children) {
+      if (child === group || child === bankGroup) continue;
+      if (child.name === 'player') continue;
+      if (child.isLight || child.type === 'Object3D') continue;   // lights and their targets
+      if (!child.visible) continue;
+      child.visible = false;
+      hidden.push(child);
     }
     state.phase = 'falling';
     state.player.vel.set(0, 0, 0);
@@ -383,7 +488,8 @@ export function createFalls(ctx, stoneMaterial) {
   function end() {
     mode = 'off';
     group.visible = false;
-    if (ctx.world && ctx.world.group) ctx.world.group.visible = worldWasVisible;
+    for (const child of hidden) child.visible = true;
+    hidden.length = 0;
     if (ctx.engine && ctx.engine.setCinematic) ctx.engine.setCinematic(null, null);
 
     const p = state.player.pos;
@@ -424,30 +530,41 @@ export function createFalls(ctx, stoneMaterial) {
    * DOWN the curtain rather than following the hand exactly, so the frame keeps
    * the whole drop in it instead of tracking one small thing.
    */
+  let cineFov = 62;
+
   function poseCamera(u, py) {
     const ease = u * u * (3 - 2 * u);          // smoothstep: no snap at either end
-    // NOT AN ORBIT. An orbit round the lip passes through the PLANE of the
-    // falls at ninety degrees, where the camera ends up level with a thirty
-    // metre curtain from eleven metres away: two flat slabs filling the frame
-    // and nothing to read. Two earlier cuts of this shot failed that way.
+    // A CUT, then a move. Three versions tried to EASE out of the chase
+    // camera's own pose, and all three opened on a soup of pale triangles -
+    // because from behind and above the lip, the curtain is edge-on, the river
+    // is a grazing translucent sheet, and the basin is another one behind it.
+    // The set is built to be seen from below and to one side; there is no path
+    // from the chase pose to that which passes through a good frame.
     //
-    // So Z travels monotonically from behind the lip to well downstream, and X
-    // makes a single excursion out and back that peaks halfway - the camera
-    // passes the falling hand on one side and comes back onto the centre line
-    // to open out on the whole drop. It never crosses |x| = GORGE_HALF, so it
-    // is never inside the cliff.
-    const camZ = 6 - ease * 46;
-    const camX = Math.sin(ease * Math.PI) * 10;
-    // Rises relative to the hand as it goes, so the shot opens out from a close
-    // follow into the whole waterfall. It starts at the chase camera's own
-    // height and distance, which is what makes the cut into it invisible.
-    const camY = py + 3.0 + ease * 15;
+    // So it cuts. The shot opens already over the edge, level with the top of
+    // the curtain and fourteen metres to one side, looking slightly UP at the
+    // water coming over - which is the whole reason to have a waterfall - and
+    // then sinks and pulls back with the hand until the last frame holds all
+    // forty-six metres of it. Cutting to a better angle is what cutting is for.
+    const camX = 14 * Math.cos(ease * Math.PI * 0.5);
+    const camY = py - 6 + ease * 24;
+    const camZ = -14 - ease * 30;
     _camPos.set(lipX + camX, GY + camY, lipZ + camZ);
+    // THE LENS OPENS. 62 degrees at the lip is tighter than the game's own 68,
+    // so the first beat is close on the hand; 82 at the bottom is wide enough
+    // that the whole forty-six metres fits with the gorge either side of it.
+    // Widening a lens while pulling back is the oldest trick there is and it
+    // still works: the fall feels like it is getting further away from you.
+    cineFov = 62 + ease * 20;
     // Aim rides DOWN the curtain rather than tracking the hand exactly, so the
     // frame keeps the fall in it instead of chasing one small thing.
-    const aimY = py * (1 - 0.55 * ease) - ease * 10;
+    // The aim rides down the curtain rather than tracking the hand exactly, so
+    // the frame keeps the waterfall in it instead of chasing one small thing.
+    // It starts just under the lip, which puts the hand near the top of frame
+    // with the drop opening below it.
+    const aimY = py * (1 - 0.55 * ease) - 4.0 - ease * 6.0;
     _camLook.set(lipX, GY + aimY, lipZ - 1.5);
-    if (ctx.engine && ctx.engine.setCinematic) ctx.engine.setCinematic(_camPos, _camLook);
+    if (ctx.engine && ctx.engine.setCinematic) ctx.engine.setCinematic(_camPos, _camLook, cineFov);
   }
 
   /**
@@ -497,20 +614,24 @@ export function createFalls(ctx, stoneMaterial) {
     // here, because everything else in the frame - the hand's own animation,
     // the mist, the camera easing - has to slow with it or the fall is the only
     // thing that looks slow.
-    const scale = mode === 'falling' ? 0.35 : 1;
+    const scale = mode === 'falling' ? 0.30 : 1;
     t += dt;
 
     if (mode === 'falling') {
       const u = Math.min(1, t / FALL_TIME);
       // Accelerating, but nothing like real gravity: at 1g this drop is 3.1s of
       // which the last second covers half the distance, and the point of the
-      // shot is the middle of the fall.
-      const fall = u * u * 0.72 + u * 0.28;
+      // shot is the middle of the fall. The cubic term is the HANG - the first
+      // half second barely moves, so the hand steps off the lip and floats
+      // before it goes, which is the beat that makes it read as a fall rather
+      // than as a drop through a trapdoor.
+      const fall = u * u * u * 0.30 + u * u * 0.56 + u * 0.14;
       const py = -DROP * fall;
       const p = s.player.pos;
       p.set(lipX, GY + py, lipZ - 1.0 - u * 2.0);
       // Turning slowly as it goes, so the hand is not a rigid prop.
-      s.player.yaw = entryYaw + u * 2.4;
+      // A slow turn, not a spin: 1.5 radians over five seconds.
+      s.player.yaw = entryYaw + u * 1.5;
       poseCamera(u, py);
       // Mist rolls while you fall.
       mist.rotation.y += dt * 0.20;
@@ -527,7 +648,8 @@ export function createFalls(ctx, stoneMaterial) {
   function reset() {
     if (mode !== 'off') {
       group.visible = false;
-      if (ctx.world && ctx.world.group) ctx.world.group.visible = worldWasVisible;
+      for (const child of hidden) child.visible = true;
+      hidden.length = 0;
       if (ctx.engine && ctx.engine.setCinematic) ctx.engine.setCinematic(null, null);
     }
     mode = 'off';
