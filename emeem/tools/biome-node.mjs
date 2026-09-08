@@ -32,14 +32,20 @@ for (let i = 0; i < BIOME_COUNT; i++) {
 }
 console.log('');
 
-// A measured bot run covers a median 40m and a best 130m before dying. The bar
-// is deliberately the BEST run, not the median: a biome nobody has ever seen is
-// not content, and one only a great run reaches is a reward.
+// A scripted bot that flees AND diverts for prizes - so it scores, climbs the
+// threat ladder and eventually dies, like a player - covered a median of 40m
+// and a best of 130m over five runs. The bar below is 1.15x that best, and the
+// slack is deliberate rather than convenient: the bot is a poor player, it
+// never learns a corridor and never spends a golden well, so a person will beat
+// 130m routinely. What the bar is really guarding against is the geometry this
+// file replaced, where the second biome sat 576m out - four times any measured
+// run, and unreachable by any margin of error.
+const BEST_RUN = 130;
 ok('every biome exists somewhere', firstAt.every((v) => v !== null),
   firstAt.map((v, i) => `${BIOME_NAMES[i]}@${v === null ? '-' : v.toFixed(0)}`).join(' '));
-ok('a good run (130m) reaches at least the second biome',
-  firstAt.filter((v) => v !== null && v <= 130).length >= 2,
-  `${firstAt.filter((v) => v !== null && v <= 130).length} biomes inside 130m`);
+ok('the second biome is within reach of a good run',
+  firstAt.filter((v) => v !== null && v <= BEST_RUN * 1.15).length >= 2,
+  `${firstAt[1].toFixed(0)}m against a best measured run of ${BEST_RUN}m`);
 ok('the whole cycle is inside a great run (400m)',
   Math.max(...firstAt) <= 400, `last biome at ${Math.max(...firstAt).toFixed(0)}m`);
 

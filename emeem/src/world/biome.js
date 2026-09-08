@@ -45,28 +45,41 @@ export const BIOME_NAMES = ['forest', 'mountain', 'beach', 'city'];
  * seconds in. At that geography three of the four biomes were unreachable: four
  * biomes built, one ever played.
  *
- * So the bands are a quarter of the size. The mountain takes over at 128m, the
- * beach at 192m and the city at 256m, and the cycle repeats every 256m. The
- * median run still spends its whole life in the forest, which is right - that
- * is the home ground - but a good one now crosses two or three biomes.
+ * So the bands shrank. The first cut of the shrink went to 64m, and that was
+ * too far the other way for a reason that is not about distance at all: a chunk
+ * is 32m, so a 64m band is TWO CHUNK ROWS. Standing at the middle of one, the
+ * row behind was already the previous biome and the row ahead the next, and the
+ * beach came out as a sand-coloured stripe between a mountain and a skyline.
+ * Fog reaches 112m; a band has to be deep enough to fill that.
  *
- * BAND IS NOT A FREE PARAMETER. Lakes recur every LAKE_PERIOD (1024m), and a
- * lake keeps the same biome only if BIOME_COUNT * BAND divides that. 4 * 64 is
- * 256 and 1024 is 4 * 256, so every lake lands at the same phase forever. A
- * "nicer" 96 would put lakes in a different biome each time.
+ * 96m is three chunk rows and the compromise that holds: the mountain takes
+ * over at 136m, the beach at 232m and the city at 328m, cycling every 384m. The
+ * median measured run (40m) still lives its whole life in the forest, which is
+ * right - that is home - a good one (130m) reaches the mountain, and the city
+ * is what a genuinely deep run is for.
+ *
+ * BAND IS NOT A FREE PARAMETER. A lake keeps the same biome only if
+ * BIOME_COUNT * BAND divides LAKE_PERIOD, or lakes walk through the biomes and
+ * one eventually lands in a city. 4 * 96 = 384, so LAKE_PERIOD moved to 1152
+ * (three cycles) to match.
  */
-const LEAD = 64;
+const LEAD = 40;
 /** Metres per biome band. See above: 4 * BAND must divide LAKE_PERIOD. */
-const BAND = 64;
+const BAND = 96;
 /**
- * Metres of cross-fade, centred on each boundary. A chunk is 32m, so this is
- * one chunk row of mixed obstacle species - and that would be a wall if the
- * species were the only thing that changed. It is not: the ground tint is
- * per-fragment and the scatter tint per-position, so both cross the boundary
- * continuously, and the chunk row that does flip is dithered by weight rather
- * than switched. Half the band is deliberate; at BAND 64 there is not room for
- * both a long blend and a long pure stretch, and a soft edge matters more here
- * than another few metres of unmixed ground.
+ * Metres of cross-fade, centred on each boundary. EXACTLY ONE CHUNK ROW, and
+ * that number is the point rather than a coincidence.
+ *
+ * The blend is where chunks are dithered between two biomes, so it is also
+ * where neither biome is at full strength. At 40m it left a pure stretch of 56m
+ * against a 32m chunk - not even two clean rows - and standing at the middle of
+ * a band, half the chunks in view belonged to a neighbour. The beach came out
+ * as speckle rather than as a beach.
+ *
+ * 32m leaves 64m pure: two whole chunk rows of unmixed biome, one row of mix.
+ * The softness that matters is carried elsewhere anyway - the ground tint is
+ * per fragment and the scatter tint per position, so both cross the boundary
+ * continuously no matter how narrow this is.
  */
 const BLEND = 32;
 /** Blend half-width, in band units. */
@@ -153,10 +166,19 @@ export const BIOME_BLEND = BLEND;
  * spawning and pixels. Nothing else.
  */
 
-/** |z| of the first lake centre. */
-export const LAKE_Z0 = 420;
-/** Metres between lake centres. */
-export const LAKE_PERIOD = 1024;
+/**
+ * |z| of the first lake centre. Chosen to sit at a BEACH band centre - sand,
+ * water and boats belong together - which at LEAD 40 / BAND 96 is 280m. It also
+ * brings the first lake 140m closer than it used to be, which is 140m more
+ * players who ever see one.
+ */
+export const LAKE_Z0 = 280;
+/**
+ * Metres between lake centres. Must be a multiple of BIOME_COUNT * BAND (384)
+ * or lakes drift through the biomes and one eventually lands in a city, which
+ * boat.js has no answer for. 1152 is three full cycles.
+ */
+export const LAKE_PERIOD = 1152;
 /**
  * MEAN half-depth along the travel axis: a 72m crossing, plus or minus the
  * shore warp below, so between 60m and 84m depending where you enter.

@@ -96,6 +96,90 @@ export const CONFIG = {
      * against 0.90 before.
      */
     scatterPerChunk: 36,
+
+    /**
+     * WHAT GROWS WHERE.
+     *
+     * One bundle per biome, indexed the same way palette.biomes is. A chunk
+     * picks ONE of these - it is not a blend - because the species is rolled
+     * before the position is drawn, because two of these introduce prop classes
+     * the forest has no meaning for (a dune, a pylon), and because the
+     * build-time guards below have to run over a finite set. The blend is
+     * carried by the things that CAN be continuous: the ground tint is per
+     * fragment, the scatter tint per position, and the chunk that flips is
+     * chosen by a weighted coin rather than a threshold, so a boundary row is a
+     * mix of chunks rather than a line.
+     *
+     * `mix` shares are normalised, so they need not sum to 1.
+     * `tint` multiplies the baked vertex colours per material, which is how a
+     * biome recolours its props without a fifth material.
+     */
+    biomes: [
+      {
+        // FOREST - the shipped world. Every number here reproduces it exactly.
+        name: 'forest',
+        mix: { tree: 0.44, rock: 0.26, bush: 0.30, fallen: 0, dune: 0, pylon: 0 },
+        treeH: [8.0, 11.0], bareTrees: 0,
+        rock: { cobble: 0.30, slab: 0.46, block: 0.24 },
+        bushScale: 1, scatterMul: 1, pebbleShare: 0.45,
+        tint: { bark: [1, 1, 1], leaf: [1, 1, 1], stone: [1, 1, 1] },
+      },
+      {
+        // MOUNTAIN - rocks, bushes and fallen trees, and what trees are left
+        // are stunted. Nothing grows tall at altitude.
+        name: 'mountain',
+        mix: { tree: 0.12, rock: 0.46, bush: 0.18, fallen: 0.24, dune: 0, pylon: 0 },
+        treeH: [5.2, 7.4], bareTrees: 0.35,
+        // Slabs and blocks over cobbles: this is scree and outcrop, not shingle.
+        rock: { cobble: 0.22, slab: 0.44, block: 0.34 },
+        bushScale: 0.85, scatterMul: 1.25, pebbleShare: 0.72,
+        tint: { bark: [0.92, 0.90, 0.95], leaf: [0.78, 0.88, 0.80], stone: [1.06, 1.04, 1.02] },
+      },
+      {
+        // BEACH - dunes, and little else standing. Everything bleached.
+        name: 'beach',
+        mix: { tree: 0.04, rock: 0.07, bush: 0.13, fallen: 0.08, dune: 0.68, pylon: 0 },
+        treeH: [6.0, 8.5], bareTrees: 0.55,
+        rock: { cobble: 0.62, slab: 0.30, block: 0.08 },
+        // Marram grass: low, and there is a lot of it.
+        bushScale: 0.62, scatterMul: 1.5, pebbleShare: 0.55,
+        // The stone tint is what paints the DUNES, and it has to sit clearly
+        // ABOVE the sand ground rather than beside it: the first cut landed on
+        // rgb(196,182,141) against a ground of rgb(201,180,140), and a dune the
+        // same colour as the beach is not a dune, it is nothing.
+        // The foliage tint is marram grass, and it has to be VIOLENT on red.
+        // It multiplies foliageCalm, whose green channel is four times its red
+        // in linear space, so a gentle nudge just makes a slightly yellow
+        // forest bush. Getting olive out of that needs a 4x on red alone.
+        tint: { bark: [1.42, 1.30, 1.05], leaf: [4.20, 1.50, 2.20], stone: [1.62, 1.50, 1.18] },
+      },
+      {
+        // CITY - standing slabs and rubble, with the odd dead pole still up.
+        name: 'city',
+        mix: { tree: 0.10, rock: 0.22, bush: 0.08, fallen: 0.05, dune: 0, pylon: 0.55 },
+        treeH: [5.5, 8.0], bareTrees: 0.85,
+        rock: { cobble: 0.52, slab: 0.36, block: 0.12 },
+        bushScale: 0.7, scatterMul: 0.85, pebbleShare: 0.80,
+        tint: { bark: [0.86, 0.86, 0.92], leaf: [0.70, 0.76, 0.72], stone: [1.02, 1.02, 1.10] },
+      },
+    ],
+
+    /**
+     * A FALLEN TREE. Length along its own axis, and trunk radius; the collider
+     * is the log's AABB with its top at 2 * radius, which keeps every log under
+     * rockHopCeiling and therefore hoppable by construction.
+     */
+    fallen: { len: [4.0, 9.0], radius: [0.22, 0.46] },
+    /**
+     * A DUNE. Wide and low: a ridge you hop rather than a wall you go round.
+     * `top` stays clear of rockHopCeiling with the same margin the slabs use.
+     */
+    dune: { halfX: [3.6, 7.6], top: [0.62, 1.34] },
+    /**
+     * A CITY PYLON. Tall enough that it is never hoppable and never mistaken
+     * for a rock, and spaced hard so a street is always walkable.
+     */
+    pylon: { half: [1.1, 2.4], height: [4.5, 9.5], spacing: 3.6 },
     /**
      * Rocks come in three jobs and a rock's SIZE tells you which.
      *
