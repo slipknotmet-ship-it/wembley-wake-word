@@ -121,6 +121,47 @@ ok('the Protector swims slower than it runs', swam.speed < swam.tier * 0.85,
 ok('but still faster than a wader', swam.speed > swam.wade,
   `${swam.speed} m/s vs ${swam.wade.toFixed(2)} wading`);
 
+/* ------------------------------------------------------------------- wakes
+ *
+ * The world is flat, so a wader cannot sink: the hand stands ON the water
+ * plane. A ring that spreads and fades is the only thing saying "in the water"
+ * rather than "walking on it", and it is the sort of cosmetic that rots
+ * silently - so check it is there when it should be and gone when it should
+ * not, and that the check can tell the difference.
+ */
+console.log('\n== wakes ==');
+const readRings = () => page.evaluate(() => {
+  const out = [];
+  window.__EMEEM__.ctx.scene.traverse((o) => {
+    if (o.isMesh && o.geometry && o.geometry.type === 'RingGeometry') {
+      out.push({ visible: o.visible, opacity: +o.material.opacity.toFixed(3) });
+    }
+  });
+  return out;
+});
+
+await page.evaluate(() => {
+  const E = window.__EMEEM__;
+  E.state.player.pos.set(0, 0, -420);     // open water
+  E.state.monster.pos.set(3, 0, -414);    // in it too, and close
+});
+await mark(); await gameWait(0.8);
+const wet = await readRings();
+ok('there are two wake rings in the scene', wet.length === 2, `${wet.length} found`);
+ok('both show while both are in the water',
+  wet.length === 2 && wet.every((r) => r.visible && r.opacity > 0),
+  wet.map((r) => `${r.visible}/${r.opacity}`).join(' '));
+
+await page.evaluate(() => {
+  const E = window.__EMEEM__;
+  E.state.player.pos.set(0, 0, -200);     // dry forest, nowhere near a lake
+  E.state.monster.pos.set(3, 0, -194);
+});
+await mark(); await gameWait(0.8);
+const dry = await readRings();
+ok('and neither shows on dry land', dry.every((r) => !r.visible),
+  dry.map((r) => r.visible).join(' '));
+
 console.log('\n== the boat ==');
 const boarded = await page.evaluate(() => {
   const E = window.__EMEEM__;
@@ -163,6 +204,96 @@ const swamped = await page.evaluate(() => {
 ok('an empty hull swamps the boat', swamped.riding === false, `riding = ${swamped.riding}`);
 ok('and puts you back in the water', swamped.boat === 0, `boat = ${swamped.boat}`);
 await page.evaluate(() => { const i = window.__EMEEM__.state.input; i.z = 0; i.x = 0; });
+
+/* --------------------------------------------------------- steering, all eight
+ *
+ * The boat's motion had a PLUS on its X term where the game's forward vector
+ * (-sin h, -cos h) wants a minus, so the entire left-right axis was mirrored:
+ * press right, sail left. It shipped, and every check in this file passed,
+ * because every one of them sailed UP - and at heading 0, sin is 0 and the sign
+ * of the X term cannot be observed at all.
+ *
+ * So: all eight, each from a fresh boat on a fresh heading, recentred in the
+ * lake before the measurement so no direction can beach mid-window. The
+ * expected direction falls out of the same identity the heading solve uses -
+ * want = atan2(-ix, iz) makes forward exactly (ix, -iz) normalised - so this
+ * checks the boat against the convention rather than against numbers copied
+ * out of the implementation.
+ *
+ * EVERY WAIT IS IN GAME TIME. state.dt is clamped to render.maxDelta (0.05s),
+ * so under software rasterisation at ~4fps the world advances at a fifth of
+ * wall-clock. The first cut of this test slept in real milliseconds and gave
+ * the boat 0.38s of game time to complete a 1.66s turn: eight directions all
+ * still pointing roughly up, and eight failures that said nothing about the
+ * boat.
+ */
+console.log('\n== the boat steers where you point it ==');
+const DIRS = [
+  ['up', 0, 1], ['upright', 1, 1], ['right', 1, 0], ['downright', 1, -1],
+  ['down', 0, -1], ['downleft', -1, -1], ['left', -1, 0], ['upleft', -1, 1],
+];
+const LAKE0_CX = 0, LAKE0_CZ = -420;
+for (const [name, ix, iz] of DIRS) {
+  const res = await page.evaluate(async ([x, z, cx, cz]) => {
+    const E = window.__EMEEM__;
+    const gwait = (secs) => new Promise((done) => {
+      const t0 = E.state.time;
+      const tick = () => {
+        if (E.state.time - t0 >= secs || E.state.phase !== 'playing') done();
+        else requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
+
+    // Fresh boat, fresh heading: moorAll sets yaw 0 and board() copies it.
+    E.boats.reset();
+    E.state.input.x = 0; E.state.input.z = 0;
+    E.state.player.pos.set(cx, 0, cz + 34);
+    E.state.monster.pos.set(cx + 90, 0, cz + 90);   // nothing dies mid-measurement
+    for (let i = 0; i < 20 && !E.boats.riding(); i++) await gwait(0.2);
+    if (!E.boats.riding()) return { boarded: false };
+
+    E.boats.placeRider(cx, cz);
+    E.state.player.hull = 1;
+    E.state.input.x = x; E.state.input.z = z;
+    // 2.2s of GAME time covers the worst turn (pi at turnRate 1.9 rad/s = 1.66s)
+    // and leaves the boat at full speed.
+    await gwait(2.2);
+
+    // Recentre before the window so no heading can reach a shore inside it.
+    E.boats.placeRider(cx, cz);
+    E.state.player.hull = 1;
+    await gwait(0.05);
+    const a = { x: E.state.player.pos.x, z: E.state.player.pos.z };
+    await gwait(0.8);
+    const b = { x: E.state.player.pos.x, z: E.state.player.pos.z };
+    E.state.input.x = 0; E.state.input.z = 0;
+
+    const dx = b.x - a.x, dz = b.z - a.z;
+    const len = Math.hypot(dx, dz);
+    const el = Math.hypot(x, z);
+    const dot = len > 0.01 ? (dx * (x / el) + dz * (-z / el)) / len : 0;
+    return { boarded: true, riding: E.boats.riding(), len: +len.toFixed(2),
+             dot: +dot.toFixed(3), dx: +dx.toFixed(2), dz: +dz.toFixed(2),
+             phase: E.state.phase };
+  }, [ix, iz, LAKE0_CX, LAKE0_CZ]);
+
+  ok(`${name}: still aboard and under way when measured`,
+    res.boarded && res.riding && res.phase === 'playing' && res.len > 4,
+    res.boarded ? `${res.len}m in 0.8s, riding=${res.riding}, ${res.phase}` : 'never boarded');
+  ok(`${name}: and the boat went ${name}`, res.dot > 0.95,
+    `agreement ${res.dot} (dx=${res.dx}, dz=${res.dz})`);
+}
+
+// Put everything back: still riding a spent boat here would snap the player
+// out of every teleport the rest of this file does.
+await page.evaluate(() => {
+  const E = window.__EMEEM__;
+  E.state.input.x = 0; E.state.input.z = 0;
+  E.boats.reset();
+  E.state.player.pos.set(0, 0, -330);
+});
+await mark(); await gameWait(0.5);
 
 /* --------------------------------------------------------- the lakes AFTER the first
  *

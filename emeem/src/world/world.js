@@ -683,6 +683,83 @@ export function createWorld(ctx) {
   waterMesh.visible = false;
   group.add(waterMesh);
 
+  /**
+   * WAKES.
+   *
+   * The world is flat and nothing may move in Y, so a wader cannot sink: the
+   * hand stands ON the water plane looking like it is walking on the lake. The
+   * speed drop says you are wading and the picture says you are not, and the
+   * picture wins.
+   *
+   * A wake fixes it without touching Y - a ring on the surface that expands and
+   * fades on a loop, exactly the horizontal-only trick the water field itself
+   * is built on. Two singleton meshes, two draw calls, and only while something
+   * is actually in the water.
+   *
+   * The rings deliberately do NOT track speed. A wake that stops when you stop
+   * would need a velocity the world does not have to hand, and a ring that is
+   * always spreading reads as water lapping at whatever is standing in it -
+   * which is what a wader looks like anyway.
+   */
+  const WAKE_PERIOD = 1.15;      // seconds per ripple
+  const WAKE_R0 = 0.55;          // ring radius at birth, in body radii
+  const WAKE_R1 = 2.30;          // and at death
+  const wakeGeometry = new THREE.RingGeometry(0.82, 1.0, 28);
+  wakeGeometry.rotateX(-Math.PI / 2);
+
+  function makeWake(scale) {
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0xd8f0f6,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(wakeGeometry, mat);
+    mesh.rotation.set(0, 0, 0);
+    mesh.renderOrder = 2;          // after the water, which is renderOrder 1
+    mesh.visible = false;
+    mesh.frustumCulled = false;    // it is always within a few metres of the camera target
+    mesh.userData.baseScale = scale;
+    group.add(mesh);
+    return mesh;
+  }
+  const playerWake = makeWake(0.62);
+  const monsterWake = makeWake(1.35);
+  let wakePhase = 0;
+
+  /**
+   * @param {THREE.Mesh} mesh   the ring
+   * @param {object} pos        something with x and z
+   * @param {number} phase      0..1 through this ring's ripple
+   * @param {number} scale      extra size multiplier (the Protector grows)
+   */
+  function placeWake(mesh, pos, phase, scale) {
+    if (!pos) { mesh.visible = false; return; }
+    const wet = waterAt(pos.x, pos.z);
+    // 0.15 rather than 0: the outermost centimetres of the feather are damp
+    // ground, and a ring blinking on there would strobe along the whole shore.
+    if (wet <= 0.15) { mesh.visible = false; return; }
+    const r = (WAKE_R0 + (WAKE_R1 - WAKE_R0) * phase) * mesh.userData.baseScale * scale;
+    mesh.position.set(pos.x, W.groundY + 0.035, pos.z);
+    mesh.scale.set(r, 1, r);
+    // Fade in fast, out slowly: a ring that appears at full strength pops.
+    const fade = phase < 0.15 ? phase / 0.15 : 1 - (phase - 0.15) / 0.85;
+    mesh.material.opacity = 0.42 * fade * Math.min(1, wet / 0.4);
+    mesh.visible = mesh.material.opacity > 0.01;
+  }
+
+  function updateWakes(dt, s) {
+    wakePhase += dt / WAKE_PERIOD;
+    if (wakePhase >= 1) wakePhase -= Math.floor(wakePhase);
+    placeWake(playerWake, s.player && s.player.pos, wakePhase, 1);
+    // Half a period out of step, so the two are never a matching pair of
+    // circles pulsing in lockstep across the lake.
+    const mp = wakePhase >= 0.5 ? wakePhase - 0.5 : wakePhase + 0.5;
+    placeWake(monsterWake, s.monster && s.monster.pos, mp,
+      Math.max(1, (s.monster && s.monster.scale) || 1));
+  }
+
   /** Puts the water plane on the nearest lake, or hides it if none is close. */
   function placeWater(px, pz) {
     const n = lakeIndex(pz);
@@ -1529,6 +1606,7 @@ export function createWorld(ctx) {
     const s = (c && c.state) || ctx.state;
     recentre(s.player && s.player.pos);
     if (s.player && s.player.pos) placeWater(s.player.pos.x, s.player.pos.z);
+    updateWakes(dt, s);
     streamAround(centreX, centreZ, MAX_BUILDS_PER_FRAME, s.levelIndex | 0);
     followGround(centreX, centreZ);
     applyDread(s.dread);

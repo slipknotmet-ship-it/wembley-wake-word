@@ -1,9 +1,10 @@
 /**
  * EMEEM - the boat.
  *
- * Three sit moored in the shallows on the near shore of every lake. Walk into
- * one and you are aboard; the 8-way pad steers instead of walking, JUMP gets you
- * off, and a hull meter drains the whole time you are on the water.
+ * Three canoes sit moored in the shallows on the near shore of every lake. Walk
+ * into one and you are aboard; the 8-way pad steers instead of walking, JUMP
+ * gets you off, and a hull meter drains the whole time you are on the water.
+ * The paddle strokes while you move and stands stowed upright while you do not.
  *
  * WHY A FINITE HULL AND NOT A CLEVER TURN RADIUS. On open water the Protector's
  * steering degenerates to pure pursuit, so a boat holding a minimum-radius
@@ -27,89 +28,215 @@ const B = CONFIG.world.boat;
 const TAU = Math.PI * 2;
 const _spot = { x: 0, z: 0 };
 
-/** A little punt: flat deck, raked bow, a mast tall enough to see through fog. */
-function buildBoatGeometry() {
-  const parts = [];
-  const hull = new THREE.BoxGeometry(1.5, 0.34, 3.2);
-  hull.translate(0, 0.17, 0);
-  parts.push(hull);
-  const bow = new THREE.ConeGeometry(0.75, 1.1, 4);
-  bow.rotateX(-Math.PI / 2);
-  bow.rotateY(Math.PI / 4);
-  bow.translate(0, 0.17, -2.05);
-  parts.push(bow);
-  const mast = new THREE.CylinderGeometry(0.06, 0.08, 3.2, 5);
-  mast.translate(0, 1.6, 0.2);
-  parts.push(mast);
-  const flag = new THREE.BoxGeometry(0.9, 0.42, 0.04);
-  flag.translate(0.45, 2.9, 0.2);
-  parts.push(flag);
+/**
+ * A CANOE, and a paddle to drive it with.
+ *
+ * Hand-rolled triangles rather than boxes, because a canoe is the one shape a
+ * box cannot fake: it is pointed at BOTH ends, its beam swells amidships, and
+ * its keel and gunwale both rise toward the stems. Nine stations along the
+ * length carry those three curves, and the skin is stitched between them.
+ *
+ * It is a hollow shell - outer skin, inner skin, and a rim capping the two -
+ * because the material is FrontSide and a single-sided hull is invisible from
+ * above, which would show the lake straight through the boat you are sitting in.
+ *
+ * COLOUR IS THE VISIBILITY MARKER. The first version carried a 3.2m mast and a
+ * pennant purely so a boat could be found at ninety metres through fog. A canoe
+ * with a mast is not a canoe, so the job moves to the hull: a vermilion shell on
+ * teal water is the loudest thing on the lake, and at 4.4m long it subtends more
+ * of the screen at that range than the mast ever did.
+ */
+const HULL_LEN = 4.4;
+const HULL_BEAM = 1.12;
+/** Gunwale height amidships, and how much higher the stems ride. */
+const SHEER_MID = 0.44;
+const SHEER_END = 0.32;
+/** Rocker: how far the keel lifts clear of the water at the ends. */
+const KEEL_END = 0.17;
+const STATIONS = 9;
 
-  const merged = mergeParts(parts);
-  for (const p of parts) p.dispose();
-  return merged;
+/** Half-beam at station t in [-1, 1]. Zero at both stems, fullest amidships. */
+const halfBeam = (t) => (HULL_BEAM / 2) * Math.pow(Math.max(0, 1 - t * t), 0.62);
+const gunwaleY = (t) => SHEER_MID + SHEER_END * t * t;
+const keelY = (t) => KEEL_END * t * t;
+
+/** Accumulates flat-shaded triangles with a baked vertex colour. */
+function makeSink() {
+  const pos = [], nor = [], col = [];
+  const push = (ax, ay, az, bx, by, bz, cx, cy, cz, r, g, b) => {
+    const ux = bx - ax, uy = by - ay, uz = bz - az;
+    const vx = cx - ax, vy = cy - ay, vz = cz - az;
+    let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const len = Math.hypot(nx, ny, nz) || 1;
+    nx /= len; ny /= len; nz /= len;
+    pos.push(ax, ay, az, bx, by, bz, cx, cy, cz);
+    nor.push(nx, ny, nz, nx, ny, nz, nx, ny, nz);
+    col.push(r, g, b, r, g, b, r, g, b);
+  };
+  return {
+    tri: push,
+    /** Two triangles, wound a-b-c-d. */
+    quad(a, b, c, d, r, g, b2) {
+      push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2], r, g, b2);
+      push(a[0], a[1], a[2], c[0], c[1], c[2], d[0], d[1], d[2], r, g, b2);
+    },
+    /** An axis-aligned box, given centre and half-extents. */
+    box(cx, cy, cz, hx, hy, hz, r, g, b2) {
+      const x0 = cx - hx, x1 = cx + hx, y0 = cy - hy, y1 = cy + hy, z0 = cz - hz, z1 = cz + hz;
+      const P = [[x0,y0,z0],[x1,y0,z0],[x1,y1,z0],[x0,y1,z0],[x0,y0,z1],[x1,y0,z1],[x1,y1,z1],[x0,y1,z1]];
+      const F = [[4,5,6,7],[1,0,3,2],[0,4,7,3],[5,1,2,6],[3,7,6,2],[0,1,5,4]];
+      for (const f of F) this.quad(P[f[0]], P[f[1]], P[f[2]], P[f[3]], r, g, b2);
+    },
+    build() {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
+      g.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(nor), 3));
+      // barkMaterial has vertexColors: true, and a geometry with no colour
+      // attribute reads the constant (0,0,0) and renders PURE BLACK. This is
+      // the whole reason every part below carries one.
+      g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(col), 3));
+      g.computeBoundingSphere();
+      return g;
+    },
+  };
 }
 
-function mergeParts(parts) {
-  // Hand-rolled merge so this file does not need BufferGeometryUtils: every
-  // part is non-indexed position+normal, and the boat is one small mesh.
-  let total = 0;
-  const nonIndexed = parts.map((g) => {
-    const ni = g.index ? g.toNonIndexed() : g.clone();
-    ni.deleteAttribute('uv');
-    total += ni.attributes.position.count;
-    return ni;
-  });
-  const pos = new Float32Array(total * 3);
-  const nor = new Float32Array(total * 3);
-  // barkMaterial has vertexColors: true, and a geometry with no colour
-  // attribute reads the constant (0,0,0) and renders PURE BLACK. This is the
-  // whole reason the boat needs one.
-  const col = new Float32Array(total * 3);
-  let o = 0;
-  for (let i = 0; i < nonIndexed.length; i++) {
-    const g = nonIndexed[i];
-    const p = g.attributes.position.array;
-    const n = g.attributes.normal.array;
-    // the flag is the last part: paint it bright so it reads at 90m
-    const bright = i === nonIndexed.length - 1;
-    for (let v = 0; v < g.attributes.position.count; v++) {
-      pos[(o + v) * 3] = p[v * 3];
-      pos[(o + v) * 3 + 1] = p[v * 3 + 1];
-      pos[(o + v) * 3 + 2] = p[v * 3 + 2];
-      nor[(o + v) * 3] = n[v * 3];
-      nor[(o + v) * 3 + 1] = n[v * 3 + 1];
-      nor[(o + v) * 3 + 2] = n[v * 3 + 2];
-      col[(o + v) * 3] = bright ? 2.6 : 1.0;
-      col[(o + v) * 3 + 1] = bright ? 1.5 : 0.86;
-      col[(o + v) * 3 + 2] = bright ? 0.5 : 0.66;
-    }
-    o += g.attributes.position.count;
-    g.dispose();
+/**
+ * Vertex colours MULTIPLY the material colour, which is bark (0x6b5240) lerped
+ * toward its dread tone. So these are gains, not RGB: anything over 1 on a
+ * channel is pushing that channel past the bark it is painted onto.
+ */
+const C_HULL = [3.85, 1.32, 0.52];   // vermilion, and loud on teal
+const C_IN = [1.95, 1.55, 1.15];     // bare wood inside, so the shell has two tones
+const C_RIM = [2.60, 2.35, 2.05];    // pale rail, which is what draws the sheer line
+const C_SEAT = [1.70, 1.35, 1.00];
+const C_SHAFT = [2.05, 1.80, 1.42];
+const C_BLADE = [3.20, 2.65, 1.45];  // near-white gold: stowed upright, this is
+                                     // the thing that finds a boat through fog
+
+function buildHullGeometry() {
+  const S = makeSink();
+  // Inner skin sits inside the outer one, so the rim between them has width.
+  const INSET = 0.86, LIFT = 0.055;
+  const st = [];
+  for (let i = 0; i < STATIONS; i++) {
+    const t = -1 + (2 * i) / (STATIONS - 1);
+    st.push({ t, z: (t * HULL_LEN) / 2, w: halfBeam(t), gy: gunwaleY(t), ky: keelY(t) });
   }
-  const out = new THREE.BufferGeometry();
-  out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  out.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
-  out.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  out.computeBoundingSphere();
-  return out;
+  for (let i = 0; i < STATIONS - 1; i++) {
+    const a = st[i], b = st[i + 1];
+    for (const side of [1, -1]) {
+      // Outer skin: gunwale down to the keel line at x = 0. Wound so the face
+      // points away from the hull on each side.
+      const g0 = [side * a.w, a.gy, a.z], g1 = [side * b.w, b.gy, b.z];
+      const k0 = [0, a.ky, a.z], k1 = [0, b.ky, b.z];
+      if (side > 0) S.quad(g0, g1, k1, k0, ...C_HULL);
+      else S.quad(k0, k1, g1, g0, ...C_HULL);
+
+      // Inner skin, reversed, so the inside of the boat is visible from above.
+      const h0 = [side * a.w * INSET, a.gy, a.z], h1 = [side * b.w * INSET, b.gy, b.z];
+      const j0 = [0, a.ky + LIFT, a.z], j1 = [0, b.ky + LIFT, b.z];
+      if (side > 0) S.quad(j0, j1, h1, h0, ...C_IN);
+      else S.quad(h0, h1, j1, j0, ...C_IN);
+
+      // The rim capping the two skins along the gunwale.
+      if (side > 0) S.quad(h0, h1, g1, g0, ...C_RIM);
+      else S.quad(g0, g1, h1, h0, ...C_RIM);
+    }
+  }
+  // Two thwarts, which is what stops a canoe reading as a bathtub.
+  for (const tz of [-0.85, 0.95]) {
+    const w = halfBeam(tz / (HULL_LEN / 2)) * 0.96;
+    S.box(0, gunwaleY(tz / (HULL_LEN / 2)) - 0.05, tz, w, 0.035, 0.075, ...C_SEAT);
+  }
+  return S.build();
+}
+
+/**
+ * A single-blade paddle, grip at the origin and blade straight down -Y, so the
+ * whole stroke is two rotations of the mesh and no vertex ever moves.
+ */
+function buildPaddleGeometry() {
+  const S = makeSink();
+  // 1.55m overall, which is a real single-blade canoe paddle. The first cut was
+  // 2.0m and read as a punt pole sticking half a boat-length out to one side.
+  const SHAFT = 1.02;
+  S.box(0, 0.055, 0, 0.115, 0.05, 0.045, ...C_SHAFT);            // T-grip
+  S.box(0, -SHAFT / 2, 0, 0.032, SHAFT / 2, 0.032, ...C_SHAFT);  // shaft
+  S.box(0, -SHAFT - 0.26, 0, 0.145, 0.27, 0.016, ...C_BLADE);    // blade
+  return S.build();
 }
 
 export function createBoats(ctx, material) {
   const { state } = ctx;
   const group = new THREE.Group();
   group.name = 'boats';
-  const geo = buildBoatGeometry();
+  const hullGeo = buildHullGeometry();
+  const paddleGeo = buildPaddleGeometry();
 
-  /** One mesh per mooring of the nearest lake. Three meshes, three draw calls. */
+  /**
+   * One hull per mooring, each with its paddle as a CHILD so the paddle
+   * inherits the boat's position and yaw for free and its own rotation is
+   * nothing but the stroke. Six meshes in total, and the two boats you are not
+   * near are frustum-culled, so the usual cost is two draw calls.
+   */
   const boats = [];
   for (let i = 0; i < BOATS_PER_LAKE; i++) {
-    const mesh = new THREE.Mesh(geo, material);
+    const mesh = new THREE.Mesh(hullGeo, material);
     mesh.castShadow = false;
     mesh.receiveShadow = false;
     mesh.visible = false;
+    const paddle = new THREE.Mesh(paddleGeo, material);
+    paddle.castShadow = false;
+    paddle.receiveShadow = false;
+    mesh.add(paddle);
     group.add(mesh);
-    boats.push({ mesh, x: 0, z: 0, yaw: 0, taken: false, lake: -1 });
+    boats.push({ mesh, paddle, x: 0, z: 0, yaw: 0, taken: false, lake: -1 });
+  }
+
+  /**
+   * THE STROKE.
+   *
+   * Stowed, the paddle stands upright in the boat, blade in the air - which is
+   * how a moored canoe is actually left, and doubles as the tall bright thing
+   * that finds it through fog now that the mast is gone.
+   *
+   * Under way it is one cycle: catch at the bow, sweep to the stern, lift, swing
+   * forward, and change sides at the top of every other recovery. Nothing is
+   * skinned and no vertex moves - the mesh is built with the grip at its origin
+   * and the blade straight down, so a pitch and a roll are the whole animation.
+   */
+  const STROKE_TIME = 0.78;
+  /** Fraction of the cycle spent in the water. The rest is the recovery. */
+  const CATCH = 0.62;
+  let strokeT = 0;
+  let strokeSide = 1;
+
+  /** Upright in the boat, blade up, resting against the forward thwart. */
+  function stowPaddle(b) {
+    b.paddle.position.set(0.20, gunwaleY(0) - 0.02, 0.35);
+    b.paddle.rotation.set(Math.PI - 0.20, 0, 0.16);
+  }
+
+  function strokePaddle(b, dt, moving) {
+    if (!moving) { strokeT = 0; stowPaddle(b); return; }
+    strokeT += dt / STROKE_TIME;
+    while (strokeT >= 1) { strokeT -= 1; strokeSide = -strokeSide; }
+
+    let sweep;   // + is toward the bow (-Z), - is toward the stern
+    let lift;    // radians of extra out-lean while the blade is clear
+    if (strokeT < CATCH) {
+      const u = strokeT / CATCH;                 // power: bow -> stern
+      sweep = 0.62 - 1.16 * u;
+      lift = 0;
+    } else {
+      const u = (strokeT - CATCH) / (1 - CATCH); // recovery: stern -> bow, clear
+      sweep = -0.54 + 1.16 * u;
+      lift = Math.sin(u * Math.PI) * 0.42;
+    }
+    // Hands at the gunwale on the working side; the shaft leans out over it.
+    b.paddle.position.set(strokeSide * 0.30, gunwaleY(0) + 0.30, 0.15);
+    b.paddle.rotation.set(sweep, 0, strokeSide * (0.62 + lift));
   }
 
   let lakeShown = -1;
@@ -125,6 +252,7 @@ export function createBoats(ctx, material) {
       boatSpot(n, i, _spot);
       b.x = _spot.x; b.z = _spot.z; b.yaw = 0; b.taken = false; b.lake = n;
       b.mesh.visible = true;
+      stowPaddle(b);
     }
     riding = -1;
     speed = 0;
@@ -210,9 +338,19 @@ export function createBoats(ctx, material) {
         const rate = throttle ? B.accel : -B.decel;
         speed = Math.max(0, Math.min(B.speed, speed + rate * dt));
 
-        b.x += Math.sin(heading) * speed * dt;
+        // MINUS on both. Forward is (-sin h, -cos h) - the same convention the
+        // heading solve above is written against - and this line had a plus on
+        // the X term, which mirrored the boat's whole left-right axis: press
+        // right, sail left. It survived because every test only ever sailed UP,
+        // where sin(0) is 0 and the sign cannot be observed. There is now a
+        // check for each of the eight directions.
+        b.x -= Math.sin(heading) * speed * dt;
         b.z -= Math.cos(heading) * speed * dt;
         b.yaw = heading;
+        // Stroke whenever it is actually making way. The threshold is above the
+        // decel tail so the paddle stops the moment the boat is coasting to a
+        // halt rather than miming a stroke that is doing nothing.
+        strokePaddle(b, dt, speed > 0.8);
         p.x = b.x;
         p.z = b.z;
 
@@ -227,7 +365,10 @@ export function createBoats(ctx, material) {
       }
     }
 
-    for (let i = 0; i < boats.length; i++) place(boats[i]);
+    for (let i = 0; i < boats.length; i++) {
+      if (i !== riding) stowPaddle(boats[i]);
+      place(boats[i]);
+    }
   }
 
   function reset() {
@@ -245,6 +386,13 @@ export function createBoats(ctx, material) {
     reset,
     /** True while the player is aboard - player.js hands over its controls. */
     riding: () => riding >= 0,
+    /**
+     * Test seam: drop the boat you are riding at a given spot. The suites need
+     * it to check steering from the middle of the lake - every direction tried
+     * from the mooring beaches instantly on the three that point at the shore
+     * two metres away, which is exactly how a mirrored X axis went unnoticed.
+     */
+    placeRider: (x, z) => { if (riding >= 0) { boats[riding].x = x; boats[riding].z = z; } },
     /** Diagnostics for the suites. */
     debug: () => ({ riding, lake: lakeShown, hull: state.player.hull || 0, speed,
                     boats: boats.map((b) => ({ x: +b.x.toFixed(2), z: +b.z.toFixed(2), taken: b.taken })) }),
