@@ -255,16 +255,27 @@ const cardShown = () => page.evaluate(() => {
   return /run again/i.test(ov.innerText) && getComputedStyle(ov).visibility === 'visible';
 });
 
-await sleep(400);
+// TIMED, because this races a wall clock. The card is held back 3 REAL seconds
+// while this page renders at three or four frames a second, so a `sleep(400)`
+// plus two evaluate round trips can genuinely take longer than the hold - which
+// is a flaky failure that says "the card covered the shot" when what happened
+// is that the harness was slow. Measure how long the sample actually took and
+// let the assertion say which it was.
+const deathAt = Date.now();
+await sleep(300);
 const dying = await page.evaluate(() => ({
   phase: window.__EMEEM__.state.phase,
   deathCam: window.__EMEEM__.engine.isDeathCamera(),
 }));
 dying.overlayYet = await cardShown();
+dying.elapsed = Date.now() - deathAt;
 check('getting caught ends the run', dying.phase === 'dead', dying.phase);
 check('the death camera takes over', dying.deathCam === true, String(dying.deathCam));
-check('and the card does not cover the shot', dying.overlayYet === false,
-  dying.overlayYet ? 'card already up at 0.4s' : 'held back');
+check('and the card does not cover the shot',
+  dying.overlayYet === false || dying.elapsed >= 3000,
+  dying.overlayYet
+    ? `card up after ${dying.elapsed}ms (hold is 3000ms - the sample outran it)`
+    : `held back at ${dying.elapsed}ms`);
 
 await page.waitForFunction(() => {
   const ov = document.querySelector('.emhud-ov:not(.emhud-off)');

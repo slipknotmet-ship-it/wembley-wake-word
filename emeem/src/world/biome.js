@@ -270,6 +270,39 @@ export function waterNear(x, z, r) {
       && Math.abs(x - lakeCentreX(n)) < LAKE_HALF_X + r;
 }
 
+/* ------------------------------------------------------------- the falls */
+
+/**
+ * The far lip of the FIRST lake, which is where the waterfall is.
+ *
+ * Exported because two very different things need the same number: the cutscene
+ * that fires when you cross it, and the prop keep-out that stops anything
+ * standing in the gap between the lip and the cloud bank beyond it.
+ */
+export function fallsLipZ(x) {
+  return lakeCentreZ(0) - (LAKE_HALF_Z + shoreWarp(x - lakeCentreX(0)));
+}
+
+/**
+ * Metres past the lip that are kept empty.
+ *
+ * Standing on the far shore you could see the CITY across the drop, which
+ * announced the landing before the fall had even started - and made a
+ * forty-six metre plunge look like a step onto the next block. A bank of cloud
+ * now sits just past the lip and hides everything behind it; this keep-out is
+ * the strip in front of that cloud, so nothing poles through it.
+ *
+ * It is deliberately shallow. Everything past the cloud is hidden by the cloud,
+ * so emptying more of the world would cost the city you land IN for no gain.
+ */
+export const FALLS_VOID = 16;
+
+/** True if a prop of radius r would stand in that strip. */
+export function inFallsVoid(x, z, r) {
+  const lip = fallsLipZ(x);
+  return z < lip + r && z > lip - FALLS_VOID - r;
+}
+
 /* ------------------------------------------------------------------- boat */
 
 /** Boats per lake, spread along the near shore. */

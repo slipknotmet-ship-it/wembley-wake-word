@@ -3,6 +3,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import {
   waterAt, waterNear, lakeIndex, lakeCentreX, lakeCentreZ,
   LAKE_HALF_X, LAKE_HALF_Z, LAKE_Z0, LAKE_PERIOD, shoreWarp, SHORE_WARP_MAX,
+  inFallsVoid,
   BIOME_LEAD, BIOME_BAND, BIOME_BLEND, BIOME_COUNT, BIOME_WARP_A, BIOME_WARP_K,
   biomeAt, biomeMix, BIOME_NAMES,
 } from './biome.js';
@@ -1062,6 +1063,10 @@ export function createWorld(ctx) {
       // shoreline still puts most of its collider in the water - a boulder in
       // the lake for the boat to hit.
       if (waterNear(px, pz, visualR)) continue;
+      // Nothing in the strip between the first lake's lip and the cloud bank
+      // beyond it. Anything standing there is a thing you can see across the
+      // drop, and seeing across the drop is what stops it reading as a drop.
+      if (inFallsVoid(px, pz, visualR)) continue;
       if (overlapsPlaced(px, pz, spacing)) continue;
       spotX = px;
       spotZ = pz;
