@@ -36,23 +36,52 @@ const gameWait = (sec) => page.waitForFunction((s) => window.__EMEEM__.state.tim
   sec, { timeout: 300000, polling: 50 }).catch(() => {});
 const mark = () => page.evaluate(() => { window.__T0__ = window.__EMEEM__.state.time; });
 
+/**
+ * THE LAKE GEOMETRY COMES FROM THE GAME, not from constants retyped here.
+ *
+ * Twelve places in this file used to hard-code 420 and 1024. When the biome
+ * bands were resized, LAKE_PERIOD had to move with them (a lake keeps its biome
+ * only if BIOME_COUNT * BAND divides it) and LAKE_Z0 moved to sit at a beach
+ * centre - and every one of those twelve was then testing a lake that was no
+ * longer there, from a shore that was now dry land.
+ */
+const LK = await page.evaluate(() => ({
+  z0: window.__EMEEM__.world.lakeZ0,
+  period: window.__EMEEM__.world.lakePeriod,
+  halfZ: window.__EMEEM__.world.lakeHalfZ,
+}));
+/** Centre z of lake n, and the x it wanders to. */
+const lakeZ = (n) => -(LK.z0 + n * LK.period);
+const lakeX = (n) => +(Math.sin(n * 2.399) * 34).toFixed(2);
+console.log(`\nlakes: first at ${LK.z0}m, every ${LK.period}m, ${2 * LK.halfZ}m across\n`);
+// Handy inside page.evaluate, where the node-side helpers are out of scope.
+await page.evaluate(([cz, hz]) => {
+  // Named spots on lake 0, all relative to its real centre: the twelve literal
+  // z values these replace all pointed at a lake that moved.
+  window.__LZ0__ = cz;              // the centre, open water
+  window.__L_NEAR__ = cz + hz + 14; // dry ground on the near shore
+  window.__L_MOOR__ = cz + hz - 2;  // the waterline the boats sit on
+  window.__L_MID__ = cz + 12;       // just inside open water, near side
+  window.__L_FAR__ = cz - 14;       // open water, far side
+}, [lakeZ(0), LK.halfZ]);
+
 console.log('\n== the lake ==');
 const lake = await page.evaluate(() => {
   const E = window.__EMEEM__;
   const w = E.world;
   // sample a line across the first lake
   const pts = [];
-  for (let z = -340; z >= -500; z -= 10) pts.push([z, +w.waterAt(0, z).toFixed(2)]);
-  return { pts, dry: w.waterAt(0, -100), wet: w.waterAt(0, -420) };
+  for (let z = window.__LZ0__ + 80; z >= window.__LZ0__ - 80; z -= 10) pts.push([z, +w.waterAt(0, z).toFixed(2)]);
+  return { pts, dry: w.waterAt(0, -100), wet: w.waterAt(0, window.__LZ0__) };
 });
-ok('there is water where the lake is', lake.wet === 1, `waterAt(0,-420) = ${lake.wet}`);
+ok('there is water where the lake is', lake.wet === 1, `waterAt(0,${lakeZ(0)}) = ${lake.wet}`);
 ok('and none where there is not', lake.dry === 0, `waterAt(0,-100) = ${lake.dry}`);
 
 // --- put the player on the near shore, next to the middle boat
 await page.evaluate(() => {
   const E = window.__EMEEM__;
-  E.state.player.pos.set(0, 0, -370);
-  E.state.monster.pos.set(0, 0, -330);   // behind, on the shore
+  E.state.player.pos.set(0, 0, window.__L_MOOR__ + 16);
+  E.state.monster.pos.set(0, 0, window.__L_NEAR__ + 40);   // behind, on the shore
 });
 await mark(); await gameWait(1.5);
 
@@ -78,7 +107,7 @@ ok('no emeem floats on the lake', clean.prizesInWater === 0, `${clean.prizesInWa
 console.log('\n== wading is slow, and the swimmer is faster than you ==');
 const wade = await page.evaluate(() => {
   const E = window.__EMEEM__, s = E.state;
-  s.player.pos.set(0, 0, -420);            // open water
+  s.player.pos.set(0, 0, window.__LZ0__);   // open water
   s.input.z = 1;
   return { wet: s.player.wet };
 });
@@ -109,8 +138,8 @@ const swimHold = setInterval(() => {
   page.evaluate(() => {
     const s = window.__EMEEM__.state;
     if (s.phase !== 'playing') return;
-    s.player.pos.set(0, 0, -408);
-    s.monster.pos.set(0, 0, -434);
+    s.player.pos.set(0, 0, window.__L_MID__);
+    s.monster.pos.set(0, 0, window.__L_FAR__ - 12);
   }).catch(() => {});
 }, 100);
 await mark(); await gameWait(4.0);
@@ -166,8 +195,8 @@ const wetHold = setInterval(() => {
   page.evaluate(() => {
     const s = window.__EMEEM__.state;
     if (s.phase !== 'playing') return;
-    s.player.pos.set(0, 0, -408);
-    s.monster.pos.set(0, 0, -430);
+    s.player.pos.set(0, 0, window.__L_MID__);
+    s.monster.pos.set(0, 0, window.__L_FAR__ - 8);
   }).catch(() => {});
 }, 100);
 await mark(); await gameWait(2.4);
@@ -199,8 +228,8 @@ const readRings = () => page.evaluate(() => {
 
 await page.evaluate(() => {
   const E = window.__EMEEM__;
-  E.state.player.pos.set(0, 0, -420);     // open water
-  E.state.monster.pos.set(3, 0, -414);    // in it too, and close
+  E.state.player.pos.set(0, 0, window.__LZ0__);  // open water
+  E.state.monster.pos.set(3, 0, window.__L_MID__ - 6);    // in it too, and close
 });
 await mark(); await gameWait(0.8);
 const wet = await readRings();
@@ -247,7 +276,8 @@ const sailing = await page.evaluate(() => {
   return { hull: +(E.state.player.hull || 0).toFixed(3), z: +E.state.player.pos.z.toFixed(1),
            riding: E.boats.riding(), speed: +E.boats.debug().speed.toFixed(2) };
 });
-ok('the boat moves up-screen under the pad', sailing.z < -400, `z = ${sailing.z} (started -386)`);
+ok('the boat moves up-screen under the pad', sailing.z < lakeZ(0) + LK.halfZ - 16,
+  `z = ${sailing.z} (moored at ${(lakeZ(0) + LK.halfZ - 2).toFixed(0)})`);
 ok('the boat is faster than wading', sailing.speed > 5, `${sailing.speed} m/s`);
 ok('the hull drains while aboard', sailing.hull < 1 && sailing.hull > 0.4, `${sailing.hull} left`);
 
@@ -289,7 +319,7 @@ const DIRS = [
   ['up', 0, 1], ['upright', 1, 1], ['right', 1, 0], ['downright', 1, -1],
   ['down', 0, -1], ['downleft', -1, -1], ['left', -1, 0], ['upleft', -1, 1],
 ];
-const LAKE0_CX = 0, LAKE0_CZ = -420;
+const LAKE0_CX = lakeX(0), LAKE0_CZ = lakeZ(0);
 for (const [name, ix, iz] of DIRS) {
   const res = await page.evaluate(async ([x, z, cx, cz]) => {
     const E = window.__EMEEM__;
@@ -348,7 +378,7 @@ await page.evaluate(() => {
   const E = window.__EMEEM__;
   E.state.input.x = 0; E.state.input.z = 0;
   E.boats.reset();
-  E.state.player.pos.set(0, 0, -330);
+  E.state.player.pos.set(0, 0, window.__L_NEAR__ + 40);
 });
 await mark(); await gameWait(0.5);
 
@@ -374,7 +404,7 @@ await mark(); await gameWait(0.5);
  * be rediscovered by someone drowning.
  */
 console.log('\n== the canoe is the answer and wading is not ==');
-const CZ0 = -420;
+const CZ0 = lakeZ(0);
 for (const useBoat of [false, true]) {
   // The gentlest tier for the wade, the harshest for the canoe.
   const tierIdx = useBoat ? 7 : 0;
@@ -446,7 +476,7 @@ await page.evaluate(() => { window.__EMEEM__.boats.reset(); });
 
 /* --------------------------------------------------------- the lakes AFTER the first
  *
- * Everything above tests lake 0 at z=-420, and for a while that was the whole
+ * Everything above tests lake 0 only, and for a while that was the whole
  * suite - which meant the repeating half of a repeating feature was unproven.
  * Lakes recur every LAKE_PERIOD and their centres WANDER in X (lakeCentreX is a
  * sine of the index), so lake 1 is at (23.0, -1444) and lake 2 at (-33.9,
@@ -456,16 +486,18 @@ await page.evaluate(() => { window.__EMEEM__.boats.reset(); });
  */
 console.log('\n== the lakes after the first ==');
 
-const lakeGeom = await page.evaluate(() => {
+const SCAN = LK.z0 + LK.period * 3 + LK.halfZ;      // far enough for four lakes
+const expectRuns = 4;
+const lakeGeom = await page.evaluate(([Z0, PER]) => {
   const w = window.__EMEEM__.world;
   const out = [];
   for (let n = 0; n < 4; n++) {
-    const cz = -(420 + n * 1024);
+    const cz = -(Z0 + n * PER);
     const cx = Math.sin(n * 2.399) * 34;
     out.push({ n, cx: +cx.toFixed(2), cz, centre: w.waterAt(cx, cz), short: w.waterAt(cx, cz + 40) });
   }
   return out;
-});
+}, [LK.z0, LK.period]);
 for (const g of lakeGeom) {
   ok(`lake ${g.n} is open water at its centre (${g.cx}, ${g.cz})`, g.centre === 1, `waterAt = ${g.centre}`);
   ok(`lake ${g.n} is dry 40m short of it`, g.short === 0, `waterAt = ${g.short}`);
@@ -473,28 +505,28 @@ for (const g of lakeGeom) {
 
 // Sample the whole corridor. A lake that never appears and a lake that never
 // ends both fail this; a single centre-point probe catches neither.
-const profile = await page.evaluate(() => {
+const profile = await page.evaluate(([Z0, PER, SCAN]) => {
   const w = window.__EMEEM__.world;
   let wet = 0, dry = 0, runs = 0, was = false;
-  for (let z = 0; z >= -3600; z -= 2) {
-    const cx = Math.sin(Math.round((-z - 420) / 1024) * 2.399) * 34;
+  for (let z = 0; z >= -SCAN; z -= 2) {
+    const cx = Math.sin(Math.round((-z - Z0) / PER) * 2.399) * 34;
     const isWet = w.waterAt(cx, z) > 0;
     if (isWet && !was) runs++;
     was = isWet;
     if (isWet) wet++; else dry++;
   }
   return { wet, dry, runs };
-});
+}, [LK.z0, LK.period, SCAN]);
 // THE SHORELINE MUST NOT BE STRAIGHT. A rectangle seen from a camera that never
 // rotates draws a dead horizontal line across the whole screen, and that is what
 // the first build of this lake looked like. Walk the near waterline across the
 // visible width and check it actually moves.
-const shore = await page.evaluate(() => {
+const shore = await page.evaluate(([Z0C, HZ]) => {
   const w = window.__EMEEM__.world;
   const zs = [];
   for (let x = -60; x <= 60; x += 4) {
     // bisect for the waterline on this column of the first lake
-    let lo = -456, hi = -300;
+    let lo = Z0C - HZ, hi = Z0C + HZ;
     for (let i = 0; i < 40; i++) {
       const mid = (lo + hi) / 2;
       if (w.waterAt(x, mid) > 0) lo = mid; else hi = mid;
@@ -502,7 +534,7 @@ const shore = await page.evaluate(() => {
     zs.push(lo);
   }
   return { min: Math.min(...zs), max: Math.max(...zs), n: zs.length };
-});
+}, [lakeZ(0), LK.halfZ + 12]);
 ok('the shoreline bends instead of ruling a straight line',
   shore.max - shore.min > 4,
   `${(shore.max - shore.min).toFixed(1)}m of wander across 120m of shore`);
@@ -510,13 +542,14 @@ ok('but it stays a shoreline, not a fjord',
   shore.max - shore.min < 16,
   `${(shore.max - shore.min).toFixed(1)}m`);
 
-ok('four lakes in the first 3.6km, one per 1024m', profile.runs === 4, `${profile.runs} stretches of water`);
+ok(`one lake per ${LK.period}m of walking`, profile.runs === expectRuns,
+  `${profile.runs} stretches of water in ${SCAN}m, expected ${expectRuns}`);
 ok('water stays a small fraction of the walk', profile.wet / (profile.wet + profile.dry) < 0.10,
   `${(100 * profile.wet / (profile.wet + profile.dry)).toFixed(1)}% wet`);
 
 for (const n of [1, 2]) {
-  const cz = -(420 + n * 1024);
-  const cx = +(Math.sin(n * 2.399) * 34).toFixed(2);
+  const cz = lakeZ(n);
+  const cx = lakeX(n);
   console.log(`\n-- lake ${n} at (${cx}, ${cz}) --`);
 
   await page.evaluate(([x, z]) => {

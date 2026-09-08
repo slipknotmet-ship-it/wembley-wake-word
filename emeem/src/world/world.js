@@ -2,9 +2,9 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import {
   waterAt, waterNear, lakeIndex, lakeCentreX, lakeCentreZ,
-  LAKE_HALF_X, LAKE_HALF_Z, shoreWarp, SHORE_WARP_MAX,
+  LAKE_HALF_X, LAKE_HALF_Z, LAKE_Z0, LAKE_PERIOD, shoreWarp, SHORE_WARP_MAX,
   BIOME_LEAD, BIOME_BAND, BIOME_BLEND, BIOME_COUNT, BIOME_WARP_A, BIOME_WARP_K,
-  biomeAt, BIOME_NAMES,
+  biomeAt, biomeMix, BIOME_NAMES,
 } from './biome.js';
 
 /**
@@ -109,6 +109,7 @@ const TAU = Math.PI * 2;
 
 const _mat4 = new THREE.Matrix4();
 const _quat = new THREE.Quaternion();
+const _quatB = new THREE.Quaternion();
 const _pos = new THREE.Vector3();
 const _scl = new THREE.Vector3();
 const _axis = new THREE.Vector3();
@@ -311,6 +312,19 @@ function makeTrunk(taper) {
 }
 
 const TRUNKS = [makeTrunk(0.56), makeTrunk(0.74)];
+
+/**
+ * Unit box for city pylons, non-indexed so it merges with everything else and
+ * carrying the white colour attribute every mergeable prop must have. Centred
+ * on its own base so a scale in Y raises the top and leaves the foot on the
+ * ground, exactly like the trunks.
+ */
+const BOX_SOURCE = (() => {
+  const g = new THREE.BoxGeometry(1, 1, 1).toNonIndexed();
+  g.deleteAttribute('uv');
+  g.translate(0, 0.5, 0);
+  return withColor(g);
+})();
 
 /**
  * Bakes a prop's tint and a vertical fake-AO gradient into its vertex colours,
@@ -627,6 +641,68 @@ export function createWorld(ctx) {
   }
   if (ROCK.block.h[0] <= HOP_CEIL) {
     throw new Error(`world: block base ${ROCK.block.h[0]} must clear the hop ceiling ${HOP_CEIL}`);
+  }
+
+  /**
+   * THE BUNDLES: config's per-biome rules, pre-chewed into the form buildChunk
+   * wants. Cumulative thresholds so one rng draw picks a species, a total to
+   * scale that draw by, and every band pre-clamped against the same build-time
+   * guards the forest's own numbers are held to.
+   */
+  const RAW_BUNDLES = (W.biomes && W.biomes.length === BIOME_COUNT) ? W.biomes : null;
+  const BUNDLES = [];
+  for (let i = 0; i < BIOME_COUNT; i++) {
+    const raw = RAW_BUNDLES ? RAW_BUNDLES[i] : null;
+    // Read propMix directly rather than the mTree/mRock/mBush consts below:
+    // those are declared after this block and would be in their temporal
+    // dead zone here.
+    const pm = W.propMix || {};
+    const mix = (raw && raw.mix) || { tree: pm.tree, rock: pm.rock, bush: pm.bush };
+    const order = ['tree', 'rock', 'bush', 'fallen', 'dune', 'pylon'];
+    const cum = [];
+    let acc = 0;
+    for (const k of order) { acc += Math.max(0, Number(mix[k]) || 0); cum.push(acc); }
+    const t = (raw && raw.tint) || {};
+    BUNDLES.push({
+      name: (raw && raw.name) || 'forest',
+      cum,
+      total: acc || 1,
+      treeH: (raw && raw.treeH) || [TREE_H_MIN, TREE_H_MAX],
+      bareTrees: num(raw && raw.bareTrees, 0),
+      rock: (raw && raw.rock) || null,
+      bushScale: num(raw && raw.bushScale, 1),
+      scatterMul: num(raw && raw.scatterMul, 1),
+      pebbleShare: num(raw && raw.pebbleShare, 0.45),
+      tint: {
+        bark: t.bark || [1, 1, 1],
+        leaf: t.leaf || [1, 1, 1],
+        stone: t.stone || [1, 1, 1],
+      },
+    });
+  }
+  // Per-biome rock shares, resolved the same way the forest's are.
+  for (const b of BUNDLES) {
+    const r = b.rock || { cobble: ROCK.cobble.share, slab: ROCK.slab.share, block: ROCK.block.share };
+    const list = [['cobble', num(r.cobble, 0)], ['slab', num(r.slab, 0)], ['block', num(r.block, 0)]];
+    const tot = list.reduce((a, x) => a + x[1], 0) || 1;
+    b.rockShares = list;
+    b.rockTotal = tot;
+  }
+
+  const FALLEN = W.fallen || { len: [4, 9], radius: [0.22, 0.46] };
+  const DUNE = W.dune || { halfX: [2.2, 4.4], top: [0.55, 1.30] };
+  const PYLON = W.pylon || { half: [1.1, 2.4], height: [4.5, 9.5], spacing: 3.6 };
+  // The same rule the slabs are held to: a log or a dune is a thing you HOP,
+  // so its top must clear neither more nor less than the measured ceiling.
+  if (DUNE.top[1] >= HOP_CEIL) {
+    throw new Error(`world: dune top ${DUNE.top[1]} must stay under the hop ceiling ${HOP_CEIL}`);
+  }
+  if (FALLEN.radius[1] * 2 >= HOP_CEIL) {
+    throw new Error(`world: a log of radius ${FALLEN.radius[1]} is ${FALLEN.radius[1] * 2} tall, over the hop ceiling ${HOP_CEIL}`);
+  }
+  // And the opposite rule for a pylon: never hoppable, never a rock.
+  if (PYLON.height[0] <= HOP_CEIL) {
+    throw new Error(`world: pylon base height ${PYLON.height[0]} must clear the hop ceiling ${HOP_CEIL}`);
   }
 
   const BUSH_R_MIN = HALF_MIN;
@@ -1024,8 +1100,13 @@ export function createWorld(ctx) {
    * height of the tree so the Protector - who tramples anything shorter than
    * its stride - can never step over one.
    */
-  function placeTree(rng, originX, originZ, bucket) {
-    const h = Math.max(range(rng, TREE_H_MIN, TREE_H_MAX), MIN_TREE_H);
+  function placeTree(rng, originX, originZ, bucket, B) {
+    const band = (B && B.treeH) || [TREE_H_MIN, TREE_H_MAX];
+    const h = Math.max(range(rng, band[0], band[1]), MIN_TREE_H);
+    // A BARE tree: trunk, no crown. Standing deadwood on a mountain, a
+    // bleached snag on a beach, a pole in a city. Same trunk, same collider,
+    // and the whole foliage half below is skipped.
+    const bare = rng() < ((B && B.bareTrees) || 0);
     const trunkFrac = range(rng, 0.62, 0.75);
     // Keep the lowest leaf above the chase camera: with the canopy reaching
     // CANOPY_DROP * crownH below the trunk top, that solves to this floor.
@@ -1073,6 +1154,12 @@ export function createWorld(ctx) {
     tg.applyMatrix4(_mat4);
     paint(tg, W.groundY, h, br, bg, bb);
     _bark.push(tg);
+
+    // A bare tree stops here: the collider, the spacing and the trunk are the
+    // same, so it is still a thing you run around, but nothing green goes on
+    // top of it. That is the whole difference, and it is why it is a share of
+    // placeTree rather than a species of its own.
+    if (bare) return;
 
     // Where the leaning trunk actually ends up.
     _off.set(0, trunkH + TRUNK_SINK, 0).applyQuaternion(_quat);
@@ -1213,13 +1300,17 @@ export function createWorld(ctx) {
    * ROCK_COLLIDER_SHRINK because the AABB of a round thing sticks out past it
    * at the corners, where the visible surface has already fallen away.
    */
-  function placeRock(rng, originX, originZ, bucket) {
-    // Pick the job first, then the size inside that job's band.
-    let roll = rng() * rockShareTotal;
+  function placeRock(rng, originX, originZ, bucket, B) {
+    // Pick the job first, then the size inside that job's band. The shares are
+    // the biome's: a mountain is outcrop and scree, a beach is shingle, and the
+    // same three rock classes cover both by weighting them differently.
+    const shares = (B && B.rockShares) || rockShares;
+    const shareTotal = (B && B.rockTotal) || rockShareTotal;
+    let roll = rng() * shareTotal;
     let job = 'cobble';
-    for (let i = 0; i < rockShares.length; i++) {
-      if (roll < rockShares[i][1]) { job = rockShares[i][0]; break; }
-      roll -= rockShares[i][1];
+    for (let i = 0; i < shares.length; i++) {
+      if (roll < shares[i][1]) { job = shares[i][0]; break; }
+      roll -= shares[i][1];
     }
     const band = ROCK[job];
     const radius = bandRoll(rng, band.r, ROCK_SPREAD);
@@ -1287,8 +1378,162 @@ export function createWorld(ctx) {
    * a collider bucket at all. They still take a spacing footprint, so they
    * cannot grow out of the middle of a boulder.
    */
-  function placeBush(rng, originX, originZ) {
-    const radius = range(rng, BUSH_R_MIN, BUSH_R_MAX);
+  /**
+   * A FALLEN TREE. A trunk on its side, and the one prop in the world whose
+   * collider is not a single box.
+   *
+   * An axis-aligned box around a 9m log lying at 20 degrees is 8.9m by 3.5m -
+   * two and a half metres of invisible wall on either side of something 0.9m
+   * thick. So the log is bucketed in THREE segments along its own length, each
+   * with its own tight AABB: the same hop, without the moat.
+   */
+  function placeFallen(rng, originX, originZ, bucket, B) {
+    const len = range(rng, FALLEN.len[0], FALLEN.len[1]);
+    const r = range(rng, FALLEN.radius[0], FALLEN.radius[1]);
+    // Near-axis-aligned, with a little jitter: a free yaw would put the segment
+    // boxes back on the diagonal this exists to avoid.
+    const yaw = (rng() < 0.5 ? 0 : Math.PI / 2) + range(rng, -0.30, 0.30);
+    const ax = Math.cos(yaw);
+    const az = Math.sin(yaw);
+    const half = len * 0.5;
+    // Same reasoning as the dune: a 9m log inset by its own half-length would
+    // be looking for a spot in a 14m box, and mostly not finding one. It may
+    // overhang a chunk edge; it is thin, and what it must not do is overlap
+    // something else, which is what the spacing is for.
+    if (!findSpot(rng, originX, originZ, 0.6, spacingFor(r * 2), half)) return;
+    const px = spotX;
+    const pz = spotZ;
+    addFoot(px, pz, Math.max(r * 2, 1.2));
+
+    const SEGS = 3;
+    const segHalf = half / SEGS;
+    for (let i = 0; i < SEGS; i++) {
+      const t = -half + segHalf * (2 * i + 1);
+      const hx = Math.abs(ax) * segHalf + Math.abs(az) * r;
+      const hz = Math.abs(az) * segHalf + Math.abs(ax) * r;
+      pushCollider(bucket, px + ax * t, pz + az * t, hx, hz, r * 2);
+    }
+
+    // The trunk mesh is authored standing up along +Y, so lay it down first and
+    // then swing it round: -X so the taper runs along the log, then the yaw.
+    _quat.setFromAxisAngle(_axis.set(1, 0, 0), Math.PI / 2);
+    _quatB.setFromAxisAngle(_axis.set(0, 1, 0), -yaw);
+    _quat.premultiply(_quatB);
+    _pos.set(px - ax * half, W.groundY + r, pz - az * half);
+    _scl.set(r, len, r);
+    _mat4.compose(_pos, _quat, _scl);
+
+    const g = TRUNKS[pick(rng, TRUNKS.length)].clone();
+    g.applyMatrix4(_mat4);
+    // Dead wood: greyer and more varied than a standing trunk.
+    const bt = range(rng, 0.70, 1.02);
+    paint(g, W.groundY, r * 2, bt * range(rng, 0.96, 1.06), bt, bt * range(rng, 0.94, 1.06));
+    _bark.push(g);
+  }
+
+  /**
+   * A DUNE. A low sand ridge: two to four flattened blobs strung along one
+   * axis, under one collider, with its top held under the hop ceiling so it is
+   * always something you clear rather than something you walk around.
+   *
+   * It is built from ROCK blobs into the STONE buffer rather than the foliage
+   * one, so the beach's stone tint carries it - a dune is sand, not a shrub.
+   */
+  function placeDune(rng, originX, originZ, bucket, B) {
+    const hx = range(rng, DUNE.halfX[0], DUNE.halfX[1]);
+    const top = range(rng, DUNE.top[0], DUNE.top[1]);
+    const yaw = rng() * TAU;
+    const ax = Math.cos(yaw);
+    const az = Math.sin(yaw);
+    const hz = hx * range(rng, 0.42, 0.66);
+    const reach = Math.max(hx, hz);
+    // A SMALL inset and a SMALL spacing, both deliberate.
+    //
+    // findSpot insets the placement box by its `inset` on every side, so a 15m
+    // dune asking for its own half-length left a 17m box inside a 32m chunk and
+    // almost every dune was rejected before it was drawn - which is why the
+    // first beach had no dunes on it at all. A dune may overhang a chunk edge
+    // exactly as a tree canopy does; only the collider has to be inside, and it
+    // is, because pushCollider clamps nothing and the chunk owns it either way.
+    //
+    // The spacing is the ridge's WIDTH, not its length, so dunes lie alongside
+    // each other and run together into a field. A dune field is continuous;
+    // spacing them like boulders gives you nine separate molehills.
+    if (!findSpot(rng, originX, originZ, 0.6, Math.max(hz, 1.6), reach)) return;
+    const px = spotX;
+    const pz = spotZ;
+    addFoot(px, pz, hz * 0.85);
+    // One box, sized from the ridge's own extent rather than from a circle:
+    // a dune is much longer than it is wide and a square collider round it
+    // would eat the walkable sand either side.
+    pushCollider(bucket,
+      px, pz,
+      Math.abs(ax) * hx + Math.abs(az) * hz,
+      Math.abs(az) * hx + Math.abs(ax) * hz,
+      top);
+
+    const lobes = 2 + (rng() < 0.6 ? 1 : 0) + (rng() < 0.3 ? 1 : 0);
+    for (let i = 0; i < lobes; i++) {
+      const t = lobes > 1 ? (i / (lobes - 1) - 0.5) * 2 : 0;
+      // Tallest in the middle, tapering to the horns: a ridge, not a row.
+      const f = 1 - 0.42 * Math.abs(t);
+      const lr = hx * range(rng, 0.42, 0.62) * f;
+      const ly = top * f;
+      const vi = pick(rng, ROCK_BLOBS.count);
+      composeSeated(
+        ROCK_BLOBS, vi, lr, range(rng, 0.34, 0.52), ly, 0.55, rng() * TAU,
+        px + ax * hx * t * 0.78, pz + az * hx * t * 0.78, W.groundY,
+      );
+      const g = ROCK_BLOBS.geoms[vi].clone();
+      g.applyMatrix4(_mat4);
+      const st = range(rng, 0.92, 1.10);
+      paint(g, W.groundY, top, st * range(rng, 0.99, 1.05), st, st * range(rng, 0.93, 1.01));
+      _stone.push(g);
+    }
+  }
+
+  /**
+   * A CITY PYLON. A standing slab of concrete, too tall to hop and too square
+   * to be a rock.
+   *
+   * The spacing is the whole safety argument. It is set from config rather than
+   * from the pylon's own size, and it is large: the Protector has no
+   * pathfinding beyond an obstacle slowdown, so a field of building-sized boxes
+   * with rock-sized gaps is how you get a wedged creature and a trapped player.
+   * Every pylon keeps a clear corridor around it, and the street is whatever is
+   * left over.
+   */
+  function placePylon(rng, originX, originZ, bucket, B) {
+    const hxr = range(rng, PYLON.half[0], PYLON.half[1]);
+    const hzr = hxr * range(rng, 0.55, 1.0);
+    const h = range(rng, PYLON.height[0], PYLON.height[1]);
+    const reach = Math.max(hxr, hzr);
+    if (!findSpot(rng, originX, originZ, reach + 0.05, reach + PYLON.spacing, reach)) return;
+    const px = spotX;
+    const pz = spotZ;
+    addFoot(px, pz, reach + PYLON.spacing * 0.5);
+    pushCollider(bucket, px, pz, hxr, hzr, h);
+
+    // Square to the world, not to itself: a city reads as a grid even when the
+    // things in it are not on one, and a randomly-yawed box just looks fallen.
+    _quat.setFromAxisAngle(_axis.set(0, 1, 0), (rng() < 0.5 ? 0 : Math.PI / 2) + range(rng, -0.05, 0.05));
+    _pos.set(px, W.groundY, pz);
+    _scl.set(hxr * 2, h, hzr * 2);
+    _mat4.compose(_pos, _quat, _scl);
+    const g = BOX_SOURCE.clone();
+    g.applyMatrix4(_mat4);
+    // Concrete: pale, and banded up its height by paint()'s vertical ramp so a
+    // nine-metre slab is not one flat rectangle of grey.
+    const ct = range(rng, 0.86, 1.14);
+    paint(g, W.groundY, h, ct, ct * range(rng, 0.98, 1.02), ct * range(rng, 1.0, 1.06));
+    _stone.push(g);
+  }
+
+  function placeBush(rng, originX, originZ, B) {
+    // Marram on a dune is not a forest shrub: the biome scales the whole plant
+    // rather than getting a species of its own.
+    const bs = (B && B.bushScale) || 1;
+    const radius = range(rng, BUSH_R_MIN, BUSH_R_MAX) * bs;
     // Wider than it is tall, always. A bush as tall as it is wide is a shrub
     // sculpture; undergrowth spreads.
     const h = clamp(range(rng, radius * 0.5, radius * 0.92), BUSH_H_MIN, BUSH_H_MAX);
@@ -1335,12 +1580,36 @@ export function createWorld(ctx) {
    * identity: no per-frame matrix work, and the bounding sphere is already in
    * world space for correct frustum culling.
    */
-  function mergeInto(list, material, label, meshes) {
+  /**
+   * @param {Array} list       geometries to merge, emptied and disposed here
+   * @param {THREE.Material} material
+   * @param {string} label
+   * @param {Array} meshes     output
+   * @param {number[]} [tint]  per-biome multiplier on the baked vertex colours
+   *
+   * THE BIOME TINT LANDS HERE, and nowhere else. Every prop in a chunk already
+   * bakes its own colour variation into a vertex-colour attribute; a biome just
+   * scales all of it. Doing that at merge time is one pass over one buffer per
+   * material per chunk, instead of an edit at each of the nine paint() call
+   * sites - and it cannot be forgotten by a placer added later.
+   */
+  function mergeInto(list, material, label, meshes, tint) {
     if (list.length === 0) return;
     const merged = mergeGeometries(list, false);
     for (let i = 0; i < list.length; i++) list[i].dispose();
     list.length = 0;
     if (!merged) return;
+
+    if (tint && (tint[0] !== 1 || tint[1] !== 1 || tint[2] !== 1)) {
+      const col = merged.getAttribute('color');
+      if (col) {
+        const a = col.array;
+        for (let i = 0; i < a.length; i += 3) {
+          a[i] *= tint[0]; a[i + 1] *= tint[1]; a[i + 2] *= tint[2];
+        }
+        col.needsUpdate = true;
+      }
+    }
 
     merged.computeBoundingSphere();
     const mesh = new THREE.Mesh(merged, material);
@@ -1359,8 +1628,28 @@ export function createWorld(ctx) {
    * order per prop is independent of the total count, raising the level only
    * ADDS props - the ones already there keep their exact places.
    */
+  /**
+   * Which biome's rules this chunk is built by.
+   *
+   * A WEIGHTED COIN, not a threshold. Inside a blend the mix says "0.3 of the
+   * mountain"; there is no such thing as 0.3 of a pylon, so the chunk commits
+   * to one - but it commits with probability w, so a boundary row comes out a
+   * MIX of chunks rather than a line ruled across the world. The draw is the
+   * chunk's own deterministic rng, so a chunk rebuilt at a higher threat level
+   * lands on the same biome it had before.
+   *
+   * Evaluated at the chunk CENTRE because buildChunk rolls the species before
+   * it draws the position - a prop does not know where it is when it is chosen.
+   */
+  function chunkBiome(cx, cz, rng) {
+    const m = biomeMix(cx * CS + CS * 0.5, cz * CS + CS * 0.5, _bscratch);
+    return rng() < m.w ? m.b : m.a;
+  }
+
   function buildChunk(cx, cz, level) {
     const rng = mulberry32(hashChunk(cx, cz));
+    const bi = chunkBiome(cx, cz, rng);
+    const B = BUNDLES[bi];
     const count = obstacleCountFor(level, rng);
     const originX = cx * CS;
     const originZ = cz * CS;
@@ -1372,10 +1661,14 @@ export function createWorld(ctx) {
     _stone.length = 0;
 
     for (let i = 0; i < count; i++) {
-      const roll = rng();
-      if (roll < MIX_TREE) placeTree(rng, originX, originZ, bucket);
-      else if (roll < MIX_ROCK_END) placeRock(rng, originX, originZ, bucket);
-      else placeBush(rng, originX, originZ);
+      const roll = rng() * B.total;
+      const c = B.cum;
+      if (roll < c[0]) placeTree(rng, originX, originZ, bucket, B);
+      else if (roll < c[1]) placeRock(rng, originX, originZ, bucket, B);
+      else if (roll < c[2]) placeBush(rng, originX, originZ, B);
+      else if (roll < c[3]) placeFallen(rng, originX, originZ, bucket, B);
+      else if (roll < c[4]) placeDune(rng, originX, originZ, bucket, B);
+      else placePylon(rng, originX, originZ, bucket, B);
     }
 
     // SCATTER. A second, unconditional pass of collider-free clutter: pebbles
@@ -1386,7 +1679,8 @@ export function createWorld(ctx) {
     // forest. These merge into the SAME _stone and _leaf buffers as everything
     // else, so they cost triangles and not a single extra draw call, and
     // nothing about them can ever block, trip or snag anything.
-    for (let i = 0; i < SCATTER_PER_CHUNK; i++) {
+    const scatterN = Math.round(SCATTER_PER_CHUNK * B.scatterMul);
+    for (let i = 0; i < scatterN; i++) {
       const px = originX + rng() * CS;
       const pz = originZ + rng() * CS;
       // The spawn keep-out still applies: no clutter under the player's feet.
@@ -1409,7 +1703,7 @@ export function createWorld(ctx) {
       // Ferns still grow nowhere near it.
       const wet = waterAt(px, pz);
       if (wet > SHALLOW_MAX) continue;
-      if (wet > 0 || rng() < 0.55) {
+      if (wet > 0 || rng() < B.pebbleShare) {
         const r = range(rng, 0.20, 0.62);
         const h = range(rng, 0.09, 0.30);
         const vi = pick(rng, ROCK_BLOBS.count);
@@ -1436,9 +1730,9 @@ export function createWorld(ctx) {
     }
 
     const meshes = [];
-    mergeInto(_bark, barkMaterial, `bark ${cx},${cz}`, meshes);
-    mergeInto(_leaf, foliageMaterial, `foliage ${cx},${cz}`, meshes);
-    mergeInto(_stone, stoneMaterial, `stone ${cx},${cz}`, meshes);
+    mergeInto(_bark, barkMaterial, `bark ${cx},${cz}`, meshes, B.tint.bark);
+    mergeInto(_leaf, foliageMaterial, `foliage ${cx},${cz}`, meshes, B.tint.leaf);
+    mergeInto(_stone, stoneMaterial, `stone ${cx},${cz}`, meshes, B.tint.stone);
 
     const chunk = {
       cx,
@@ -1447,6 +1741,7 @@ export function createWorld(ctx) {
       meshes,
       colliders: bucket,
       builtLevel: level,
+      biome: bi,
     };
     chunks.set(chunkKey(cx, cz), chunk);
     collidersDirty = true;
@@ -1741,5 +2036,8 @@ export function createWorld(ctx) {
     biomeNameAt,
     biomeLead: BIOME_LEAD,
     biomeBand: BIOME_BAND,
+    lakeZ0: LAKE_Z0,
+    lakePeriod: LAKE_PERIOD,
+    lakeHalfZ: LAKE_HALF_Z,
   };
 }
