@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { CONFIG } from '../core/config.js';
 import { state as globalState } from '../core/state.js';
+import { biomeMix, BIOME_COUNT } from '../world/biome.js';
 
 /**
  * engine/renderer.js
@@ -207,6 +208,8 @@ export function createRenderer(canvasEl) {
   // keep animating (the death shake happens *after* phase flips to 'dead').
   let elapsed = 0;
   let lastDread = -1; // forces the first setDread() to actually write
+  let lastAtmoX = 1e9;  // ditto for the position the atmosphere was sampled at
+  let lastAtmoZ = 1e9;
 
   // -------------------------------------------------- cached dread colours
   // Endpoints are built once; every frame lerps *into* the live Color objects
@@ -221,16 +224,89 @@ export function createRenderer(canvasEl) {
   const groundDreadC = new THREE.Color(P.groundDread);
 
   /**
+   * THE ATMOSPHERE FOLLOWS THE BIOME.
+   *
+   * The eight endpoints above are the forest's. Every biome carries its own
+   * set, and the eight live objects are rebuilt each frame from the blend at
+   * the player's position rather than being constants - so a boundary is a
+   * cross-fade of the whole sky, not a switch.
+   *
+   * WHY THE SKY IS SAMPLED SLIGHTLY AHEAD OF THE GROUND. The sky is what you
+   * are walking into, and letting it turn a beat before the ground does makes
+   * a boundary feel anticipated rather than announced.
+   *
+   * ONLY SLIGHTLY, THOUGH. The first cut was 48m, chosen against the 112m fog
+   * on the reasoning that most of the visible sky is far away. At a 64m band
+   * that is three quarters of a biome: measured at the city's centre, the sky
+   * was sampling the FOREST band beyond it and came back bluer than the
+   * forest's own. 12m is a quarter of the blend - about 1.7 seconds at walking
+   * speed - and every band centre still samples its own biome with margin.
+   */
+  const SKY_LOOKAHEAD = 12;
+  const BP = (P.biomes && P.biomes.length === BIOME_COUNT) ? P.biomes : null;
+  const _bmix = { a: 0, b: 0, w: 0 };
+  const _mixTmp = new THREE.Color();
+
+  /**
+   * Fills `out` with key `k` of the biome blend at (x, z), which is two hex
+   * lookups and a lerp. Falls back to the forest constant if no per-biome
+   * palette is configured, so a stripped config still renders a forest rather
+   * than a black world.
+   * @param {THREE.Color} out
+   * @param {string} k  palette key, e.g. 'skyCalm'
+   * @param {THREE.Color} dflt
+   */
+  function biomeColor(out, k, dflt, x, z) {
+    if (!BP) return out.copy(dflt);
+    biomeMix(x, z, _bmix);
+    out.setHex(BP[_bmix.a][k]);
+    // lerp() with an undefined alpha yields NaN channels and a black scene, so
+    // _bmix.w is guarded rather than trusted - biomeMix always writes it, but
+    // this is the one place a NaN would be invisible until the whole sky went.
+    const w = Number.isFinite(_bmix.w) ? _bmix.w : 0;
+    return w > 0 ? out.lerp(_mixTmp.setHex(BP[_bmix.b][k]), w) : out;
+  }
+
+  /** Rebuilds all eight endpoints for a position. */
+  function biomeEndpoints(x, z) {
+    const sz = z - SKY_LOOKAHEAD;   // travel is toward -Z, so ahead is smaller z
+    biomeColor(skyCalmC, 'skyCalm', skyCalmC, x, sz);
+    biomeColor(skyDreadC, 'skyDread', skyDreadC, x, sz);
+    biomeColor(fogCalmC, 'fogCalm', fogCalmC, x, sz);
+    biomeColor(fogDreadC, 'fogDread', fogDreadC, x, sz);
+    biomeColor(sunCalmC, 'sunCalm', sunCalmC, x, sz);
+    biomeColor(sunDreadC, 'sunDread', sunDreadC, x, sz);
+    // The hemisphere's ground half is bounce off the floor you are standing on,
+    // so it takes the position you are standing at, not the one ahead.
+    biomeColor(groundCalmC, 'groundCalm', groundCalmC, x, z);
+    biomeColor(groundDreadC, 'groundDread', groundDreadC, x, z);
+  }
+
+  /**
    * Paints the whole atmosphere for a given dread value.
    * Sky, fog colour, sun colour/intensity and fog distances all move together:
    * at dread 1 the sky is near-black, the sun is a blood-orange ember and the
    * fog has closed to roughly a third of its calm range, so the monster comes
    * out of nowhere.
    */
-  function setDread(t) {
+  /**
+   * @param {number} t     dread, 0..1
+   * @param {number} [x]   world position the atmosphere is sampled at
+   * @param {number} [z]
+   */
+  function setDread(t, x, z) {
     const d = clamp01(t);
-    if (Math.abs(d - lastDread) < 0.0005) return; // nothing visible changed
+    const px = Number.isFinite(x) ? x : lastAtmoX;
+    const pz = Number.isFinite(z) ? z : lastAtmoZ;
+    // The early-out has to watch the POSITION as well as the dread now: a
+    // player walking a boundary at a constant tier moves the sky without
+    // moving `d` at all, and the old test would have frozen it.
+    if (Math.abs(d - lastDread) < 0.0005
+      && Math.abs(px - lastAtmoX) < 0.5 && Math.abs(pz - lastAtmoZ) < 0.5) return;
     lastDread = d;
+    lastAtmoX = px;
+    lastAtmoZ = pz;
+    biomeEndpoints(px, pz);
 
     if (scene.background && scene.background.isColor) {
       // The sky is lerped on a curve, not linearly. Ground and obstacles carry
@@ -387,7 +463,7 @@ export function createRenderer(canvasEl) {
     if (Math.abs(S.dread - targetDread) < 0.001) S.dread = targetDread;
 
     // 2. Atmosphere.
-    setDread(S.dread);
+    setDread(S.dread, S.player.pos.x, S.player.pos.z);
 
     const pp = S.player.pos;
 
@@ -680,7 +756,11 @@ export function createRenderer(canvasEl) {
   /** Returns the atmosphere and the camera rig to their level-0 values. */
   function reset() {
     lastDread = -1;
-    setDread(0);
+    lastAtmoX = 1e9;
+    lastAtmoZ = 1e9;
+    // A real position, not a default: setDread's fallbacks are the sentinels
+    // above, and lerping toward a sentinel is how a sky ends up NaN and black.
+    setDread(0, globalState.player.pos.x, globalState.player.pos.z);
     deathCam = false;
 
     currentFov = CONFIG.camera.fov;
@@ -695,7 +775,9 @@ export function createRenderer(canvasEl) {
   }
 
   // Initial pose so the very first frame is already framed on the spawn point.
-  setDread(0);
+  // A real position for the same reason reset() passes one: the atmosphere is
+  // sampled from it, and the no-argument fallbacks are sentinels.
+  setDread(0, globalState.player.pos.x, globalState.player.pos.z);
   snapTo(globalState.player.pos);
   followShadowCamera(globalState.player.pos);
   resize();

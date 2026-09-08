@@ -3,6 +3,8 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import {
   waterAt, waterNear, lakeIndex, lakeCentreX, lakeCentreZ,
   LAKE_HALF_X, LAKE_HALF_Z, shoreWarp, SHORE_WARP_MAX,
+  BIOME_LEAD, BIOME_BAND, BIOME_BLEND, BIOME_COUNT, BIOME_WARP_A, BIOME_WARP_K,
+  biomeAt, BIOME_NAMES,
 } from './biome.js';
 
 /**
@@ -114,6 +116,16 @@ const _off = new THREE.Vector3();
 const _up = new THREE.Vector3(0, 1, 0);
 const _colA = new THREE.Color();
 const _colB = new THREE.Color();
+const _colC = new THREE.Color();
+
+/**
+ * Smallest linear channel the per-biome ground ratio will divide by. The forest
+ * ground at full dread is 0.023 linear at its darkest channel, so this is never
+ * reached in practice - it is here so that a future palette edit cannot hand
+ * the shader an Infinity and paint the whole world white.
+ */
+const GROUND_RATIO_FLOOR = 0.0025;
+const _bscratch = { a: 0, b: 0, w: 0 };
 
 /** Per-chunk geometry lists, one per shared material. Reused, never reallocated. */
 const _bark = [];
@@ -386,10 +398,30 @@ function composeSeated(pool, vi, radius, aspect, topH, buryFrac, yaw, x, z, grou
  * not swim when the ground mesh teleports to follow the player. It fades out
  * with distance, otherwise the lines alias into a grey soup at the horizon.
  */
-function applyGridShader(material, cellSize, chunkSize) {
+/**
+ * @param {THREE.Material} material
+ * @param {number} cellSize
+ * @param {number} chunkSize
+ * @param {object} biome  { lead, band, half, warpA, warpK } and a `ratios`
+ *   array of four THREE.Color multipliers, one per biome, FOREST exactly white.
+ *   Hoisted out of onBeforeCompile so the caller can keep writing to them after
+ *   the program is compiled - a uniform object created inside the callback is
+ *   unreachable from anywhere else.
+ * @returns {object} the live uniform objects, for applyDread to write into.
+ */
+function applyGridShader(material, cellSize, chunkSize, biome) {
+  const uniforms = {
+    uCell: { value: cellSize },
+    uChunk: { value: chunkSize },
+    uBiomeG: { value: biome.ratios },
+    uLead: { value: biome.lead },
+    uBand: { value: biome.band },
+    uHalf: { value: biome.half },
+    uWarpA: { value: biome.warpA },
+    uWarpK: { value: biome.warpK },
+  };
   material.onBeforeCompile = (shader) => {
-    shader.uniforms.uCell = { value: cellSize };
-    shader.uniforms.uChunk = { value: chunkSize };
+    Object.assign(shader.uniforms, uniforms);
 
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nvarying vec3 vWorldPos;')
@@ -401,7 +433,9 @@ function applyGridShader(material, cellSize, chunkSize) {
     shader.fragmentShader = shader.fragmentShader
       .replace(
         '#include <common>',
-        '#include <common>\nvarying vec3 vWorldPos;\nuniform float uCell;\nuniform float uChunk;',
+        '#include <common>\nvarying vec3 vWorldPos;\nuniform float uCell;\nuniform float uChunk;\n'
+        + 'uniform vec3 uBiomeG[ 4 ];\nuniform float uLead;\nuniform float uBand;\n'
+        + 'uniform float uHalf;\nuniform float uWarpA;\nuniform float uWarpK;',
       )
       .replace(
         '#include <color_fragment>',
@@ -418,13 +452,37 @@ function applyGridShader(material, cellSize, chunkSize) {
 		// Chunk-sized checker gives the eye a sense of speed and scale.
 		vec2 cc = floor( vWorldPos.xz / uChunk );
 		float checker = mod( cc.x + cc.y, 2.0 );
-		diffuseColor.rgb *= ( 1.0 + ( checker - 0.5 ) * 0.055 ) * ( 1.0 - line * 0.22 * fade );
+
+		// THE BIOME, per fragment.
+		//
+		// The exact twin of biomeMix() in biome.js, and it has to be exact: the
+		// ground is ONE plane that follows the player and spans several bands at
+		// once, so the CPU cannot tell it which biome it is in - only where it
+		// is. The indexed form below resolves all four in one block, and is
+		// algebraically identical to the branchy JS version at half = blend /
+		// ( 2 * band ). tools/biome-node.mjs checks the JS; tools/biome.mjs
+		// checks that this agrees with it.
+		//
+		// Dynamic indexing of a uniform array is GLSL ES 3.00, which is fine
+		// here: main.js refuses to start without WebGL2, so three.js always
+		// compiles #version 300 es.
+		float bu = max( ( -vWorldPos.z - uLead + sin( vWorldPos.x * uWarpK ) * uWarpA ) / uBand, 0.0 );
+		float bi = floor( bu + uHalf );
+		float bw = clamp( ( bu - bi + uHalf ) / ( 2.0 * uHalf ), 0.0, 1.0 );
+		// The lead is pure forest, and without this the band BEFORE the first one
+		// wraps round to the last biome and bleeds it over the start of the world.
+		bw = bi < 1.0 ? 1.0 : bw;
+		vec3 tint = mix( uBiomeG[ int( mod( bi - 1.0, 4.0 ) ) ], uBiomeG[ int( mod( bi, 4.0 ) ) ], bw );
+
+		diffuseColor.rgb *= tint * ( 1.0 + ( checker - 0.5 ) * 0.055 ) * ( 1.0 - line * 0.22 * fade );
 	}`,
       );
   };
   // Without this two Lambert materials could share a compiled program and one
-  // would silently lose the injection.
-  material.customProgramCacheKey = () => 'emeem-ground-grid';
+  // would silently lose the injection. Bumped when the injected source changes,
+  // or a cached program from the old source is reused with the new uniforms.
+  material.customProgramCacheKey = () => 'emeem-ground-grid-biome';
+  return uniforms;
 }
 
 // ================================================================== factory
@@ -438,6 +496,10 @@ export function createWorld(ctx) {
   const CONFIG = ctx.CONFIG;
   const W = CONFIG.world;
   const P = CONFIG.palette;
+  /** Four ground pairs, indexed by biome. Entry 0 must equal the base pair. */
+  const BIOME_PALETTES = (P.biomes && P.biomes.length === BIOME_COUNT)
+    ? P.biomes
+    : new Array(BIOME_COUNT).fill({ groundCalm: P.groundCalm, groundDread: P.groundDread });
   const CS = W.chunkSize;
   const VIEW = W.viewChunks;
 
@@ -604,7 +666,23 @@ export function createWorld(ctx) {
     color: P.groundCalm,
     dithering: true,
   });
-  applyGridShader(groundMaterial, CS / 8, CS);
+  /**
+   * One ratio per biome, live: applyDread writes into these and the ground
+   * shader reads them the same frame. The FOREST entry is pinned to (1,1,1) and
+   * never written, so the shipped forest is bit-identical to before the biomes
+   * existed.
+   */
+  const biomeRatios = [];
+  for (let i = 0; i < BIOME_COUNT; i++) biomeRatios.push(new THREE.Color(1, 1, 1));
+  const groundUniforms = applyGridShader(groundMaterial, CS / 8, CS, {
+    ratios: biomeRatios,
+    lead: BIOME_LEAD,
+    band: BIOME_BAND,
+    // The blend half-width in band units - the same HALF the JS biomeMix uses.
+    half: BIOME_BLEND / (2 * BIOME_BAND),
+    warpA: BIOME_WARP_A,
+    warpK: BIOME_WARP_K,
+  });
 
   // ----------------------------------------------------------------- ground
   // A single plane that follows the player, snapped to whole chunks, instead of
@@ -1531,6 +1609,24 @@ export function createWorld(ctx) {
     foliageMaterial.color.copy(_colA.setHex(P.foliageCalm).lerp(_colB.setHex(P.foliageDread), t));
     stoneMaterial.color.copy(_colA.setHex(P.rockCalm).lerp(_colB.setHex(P.rockDread), t));
     groundMaterial.color.copy(_colA.setHex(P.groundCalm).lerp(_colB.setHex(P.groundDread), t));
+
+    // The per-biome grounds, as RATIOS against the forest at this same dread.
+    // Doing the calm->dread lerp here and handing the shader a plain multiplier
+    // keeps the ramp in one place; putting it in GLSL would immediately drift
+    // from hemi.groundColor, which is lerped in renderer.js from the same pair.
+    const base = _colA;   // still holds the forest ground at t, from the line above
+    // A dread ground is dark - the forest's is 0.023 linear at its darkest - so
+    // the divide needs a floor or a palette edit could hand the shader an
+    // Infinity and paint the world white.
+    const br = Math.max(base.r, GROUND_RATIO_FLOOR);
+    const bg = Math.max(base.g, GROUND_RATIO_FLOOR);
+    const bb = Math.max(base.b, GROUND_RATIO_FLOOR);
+    for (let i = 1; i < BIOME_COUNT; i++) {
+      const pal = BIOME_PALETTES[i];
+      _colB.setHex(pal.groundCalm).lerp(_colC.setHex(pal.groundDread), t);
+      biomeRatios[i].setRGB(_colB.r / br, _colB.g / bg, _colB.b / bb);
+    }
+    if (groundUniforms) groundUniforms.uBiomeG.value = biomeRatios;
   }
 
   /** Builds the inner chunks immediately so the first rendered frame is populated. */
@@ -1602,6 +1698,9 @@ export function createWorld(ctx) {
     return W.groundY;
   }
 
+  /** Diagnostics for the suites: which biome is a point in, by name. */
+  function biomeNameAt(x, z) { return BIOME_NAMES[biomeAt(x, z, _bscratch)]; }
+
   function update(dt, c) {
     const s = (c && c.state) || ctx.state;
     recentre(s.player && s.player.pos);
@@ -1638,5 +1737,9 @@ export function createWorld(ctx) {
     barkMaterial,
     /** 0 on land, 1 in open water. The single source of truth for wetness. */
     waterAt,
+    /** Diagnostics for the suites. */
+    biomeNameAt,
+    biomeLead: BIOME_LEAD,
+    biomeBand: BIOME_BAND,
   };
 }
